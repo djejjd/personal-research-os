@@ -63,7 +63,7 @@ private slots:
   void resumesInterruptedCreationWithSameOperationId_FI_V01_PROJ_01();
   void retainsPreexistingAssetOnCollision_FI_V01_PROJ_01();
   void retainsUserModifiedAssetAndRequiresManualIntervention_FI_V01_PROJ_01();
-  void abandonsOnlyUnchangedOperationCreatedAsset_FI_V01_PROJ_01();
+  void retainsOperationCreatedAssetForManualIntervention_FI_V01_PROJ_01();
   void repeatsReadyOperationWithoutSecondAsset_FI_V01_PROJ_01();
   void startupCoordinatorRecoversPendingAfterResolverRestart_FI_V01_PROJ_01();
   void revokedRootRequiresManualInterventionAndKeepsProjectInvisible_FI_V01_PROJ_01();
@@ -129,15 +129,16 @@ void ProjectProvisioningTest::retainsUserModifiedAssetAndRequiresManualIntervent
   ProjectProvisioningSaga interrupted(databasePath, resolver, rootId, ProjectProvisioningFault::after_asset_recorded);
   QCOMPARE(interrupted.provision(operation).code, ProjectProvisioningCode::recovery_required);
   const QString assetPath = directory.filePath("project.md");
-  QVERIFY(writeFile(assetPath, "user content"));
+  ProjectProvisioningSaga verified(databasePath, resolver, rootId, ProjectProvisioningFault::after_asset_proven);
+  QCOMPARE(verified.provision(operation).code, ProjectProvisioningCode::recovery_required);
 
-  const ProjectProvisioningSaga recovered(databasePath, resolver, rootId);
-  QCOMPARE(recovered.provision(operation).code, ProjectProvisioningCode::manual_intervention_required);
-  QCOMPARE(recovered.abandon(operation.operationId).code, ProjectProvisioningCode::manual_intervention_required);
+  // 普通文件写入不参与 resolver 的 flock，模拟摘要核验完成后的外部原地改写。
+  QVERIFY(writeFile(assetPath, "user content"));
+  QCOMPARE(verified.abandon(operation.operationId).code, ProjectProvisioningCode::manual_intervention_required);
   QCOMPARE(readFile(assetPath), QByteArray("user content"));
 }
 
-void ProjectProvisioningTest::abandonsOnlyUnchangedOperationCreatedAsset_FI_V01_PROJ_01() {
+void ProjectProvisioningTest::retainsOperationCreatedAssetForManualIntervention_FI_V01_PROJ_01() {
   QTemporaryDir directory;
   QVERIFY(directory.isValid());
   const QString databasePath = initializedDatabase(directory);
@@ -149,12 +150,12 @@ void ProjectProvisioningTest::abandonsOnlyUnchangedOperationCreatedAsset_FI_V01_
   QCOMPARE(interrupted.provision(operation).code, ProjectProvisioningCode::recovery_required);
 
   const ProjectProvisioningSaga saga(databasePath, resolver, rootId);
-  QVERIFY(saga.abandon(operation.operationId).isSucceeded());
-  QVERIFY(!QFile::exists(directory.filePath("project.md")));
+  QCOMPARE(saga.abandon(operation.operationId).code, ProjectProvisioningCode::manual_intervention_required);
+  QCOMPARE(readFile(directory.filePath("project.md")), QByteArray("# 研究项目\n"));
   const auto snapshot = saga.query(operation.operationId);
   QVERIFY(snapshot.value.has_value());
   QCOMPARE(snapshot.value.value_or({}).state, ProjectProvisioningState::failed);
-  QCOMPARE(snapshot.value.value_or({}).failureCode, QString("safe_abandoned"));
+  QCOMPARE(snapshot.value.value_or({}).failureCode, QString("manual_intervention_required"));
   QVERIFY(projectIsInvisible(databasePath, operation.projectId));
 }
 

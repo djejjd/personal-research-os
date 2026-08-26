@@ -79,6 +79,7 @@ private slots:
   void marksReplacedRootInterruptedOperationForManualIntervention();
   void reusesCallerOperationIdOnlyForIdenticalIntent();
   void serializesConcurrentSameOperationIdReplay();
+  void serializesConcurrentRecoveryForSameOperationId();
 };
 
 void FileOperationLogTest::replacesOnlyMatchingBaselineAndWritesCompletionMarker() {
@@ -254,6 +255,42 @@ void FileOperationLogTest::serializesConcurrentSameOperationIdReplay() {
     worker.join();
   QCOMPARE(results[0], pros::infrastructure::FileOperationCode::none);
   QCOMPARE(results[1], pros::infrastructure::FileOperationCode::none);
+  QCOMPARE(readFile(directory.path() + "/entry.md"), QByteArray("after"));
+}
+
+void FileOperationLogTest::serializesConcurrentRecoveryForSameOperationId() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  QVERIFY(writeFile(directory.path() + "/entry.md", "before"));
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  pros::infrastructure::FileOperationLog interrupted(
+      databasePath, pros::infrastructure::FileOperationFault::after_temporary_written);
+  QCOMPARE(interrupted.replaceIfUnchanged(resolver, rootId, "entry.md", "same-recovery", digest("before"), "after")
+               .code,
+           pros::infrastructure::FileOperationCode::recovery_required);
+
+  std::barrier start(3);
+  std::array<pros::infrastructure::FileRecoveryReport, 2> reports{};
+  std::array<std::thread, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::thread([&, index] {
+      start.arrive_and_wait();
+      reports[index] = pros::infrastructure::FileOperationLog(databasePath).recoverPending(resolver);
+    });
+  }
+  start.arrive_and_wait();
+  for (std::thread &worker : workers)
+    worker.join();
+
+  QCOMPARE(reports[0].code, pros::infrastructure::FileOperationCode::none);
+  QCOMPARE(reports[1].code, pros::infrastructure::FileOperationCode::none);
+  QCOMPARE(reports[0].recoveredCount + reports[1].recoveredCount, 1);
+  QCOMPARE(scalarText(databasePath, "SELECT state FROM file_operation_log WHERE operation_id='same-recovery';"),
+           QString("completed"));
   QCOMPARE(readFile(directory.path() + "/entry.md"), QByteArray("after"));
 }
 

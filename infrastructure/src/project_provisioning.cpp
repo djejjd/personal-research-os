@@ -363,6 +363,9 @@ ProjectProvisioningResult ProjectProvisioningSaga::provision(const ProjectProvis
     markFailure(database->get(), record, "manual_intervention_required");
     return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
   }
+  if (fault_ == ProjectProvisioningFault::after_asset_proven)
+    return finish(
+        {ProjectProvisioningCode::recovery_required, record.operationId, ProjectProvisioningState::provisioning});
   return finish(activateProject(database->get(), record)
                     ? ProjectProvisioningResult{ProjectProvisioningCode::none, record.operationId,
                                                 ProjectProvisioningState::ready}
@@ -399,15 +402,9 @@ ProjectProvisioningResult ProjectProvisioningSaga::abandon(const QString &operat
                               ? ProjectProvisioningCode::none
                               : ProjectProvisioningCode::manual_intervention_required,
                           record));
-  const auto proof = resolver_.rootProof(record.rootId);
-  if (!proof || !rootMatches(*proof, record) || !record.assetIdentity ||
-      !resolver_.removeIfIdentityAndDigest(record.rootId, record.assetName, *record.assetIdentity, record.assetDigest)
-           .isAccepted()) {
-    markFailure(database->get(), record, "manual_intervention_required");
-    return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
-  }
-  return finish(markFailure(database->get(), record, "safe_abandoned")
-                    ? failure(ProjectProvisioningCode::none, record)
+  // 外部进程不参与 resolver 的 flock，无法把摘要核验与 unlink 原子化；恢复记录保留给人工处置。
+  return finish(markFailure(database->get(), record, "manual_intervention_required")
+                    ? failure(ProjectProvisioningCode::manual_intervention_required, record)
                     : ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, record.operationId,
                                                 ProjectProvisioningState::provisioning});
 }

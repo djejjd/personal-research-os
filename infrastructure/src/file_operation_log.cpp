@@ -332,9 +332,18 @@ FileRecoveryReport FileOperationLog::recoverPending(const ResourceResolver &reso
   const auto database = openDatabase(databasePath_);
   if (!database)
     return {FileOperationCode::storage_unavailable, 0, 0, {}};
+  // SQLite 写事务既是待恢复项的独占 claim，也使文件替换结果与最终状态标记按 operation_id 线性化。
+  if (sqlite3_exec(database->get(), "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    return {FileOperationCode::storage_unavailable, 0, 0, {}};
+  const auto finish = [&database](FileRecoveryReport report) {
+    if (sqlite3_exec(database->get(), "COMMIT;", nullptr, nullptr, nullptr) == SQLITE_OK)
+      return report;
+    sqlite3_exec(database->get(), "ROLLBACK;", nullptr, nullptr, nullptr);
+    return FileRecoveryReport{FileOperationCode::storage_unavailable, 0, 0, {}};
+  };
   const auto pending = readPending(database->get());
   if (!pending)
-    return {FileOperationCode::storage_unavailable, 0, 0, {}};
+    return finish({FileOperationCode::storage_unavailable, 0, 0, {}});
 
   FileRecoveryReport report;
   for (const PendingOperation &operation : *pending) {
@@ -359,14 +368,14 @@ FileRecoveryReport FileOperationLog::recoverPending(const ResourceResolver &reso
       continue;
     }
     if (!markManual(database->get(), operation.operationId))
-      return {FileOperationCode::storage_unavailable, report.recoveredCount, report.manualInterventionCount,
-              report.operationIds};
+      return finish({FileOperationCode::storage_unavailable, report.recoveredCount, report.manualInterventionCount,
+                     report.operationIds});
     ++report.manualInterventionCount;
     report.operationIds.append(operation.operationId);
   }
   if (report.manualInterventionCount > 0)
     report.code = FileOperationCode::manual_intervention_required;
-  return report;
+  return finish(report);
 }
 
 } // namespace pros::infrastructure

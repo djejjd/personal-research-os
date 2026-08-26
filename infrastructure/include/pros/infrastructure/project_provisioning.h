@@ -23,8 +23,8 @@ enum class ProjectProvisioningCode {
 
 /** 项目创建 saga 的可查询生命周期；与 Project 聚合的业务状态独立。 */
 enum class ProjectProvisioningState { provisioning, ready, failed };
-/** 仅用于故障注入，模拟资产基线已入账但尚未标记 ready 的可恢复中断。 */
-enum class ProjectProvisioningFault { none, after_asset_recorded };
+/** 仅用于故障注入，模拟资产基线入账或核验完成但尚未标记 ready 的可恢复中断。 */
+enum class ProjectProvisioningFault { none, after_asset_recorded, after_asset_proven };
 
 struct ProjectProvisioningRequest final {
   QString operationId;
@@ -71,7 +71,7 @@ public:
   /** 根证明、授权 revision、资产 identity 或内容不符时永久隔离操作；不切换目录或授权。 */
   [[nodiscard]] ProjectProvisioningResult provision(const ProjectProvisioningRequest &request) const;
 
-  /** 仅删除同一受限根内、identity 和 SHA-256 创建基线均一致的资产；其他情况要求人工处置。 */
+  /** 不自动删除 provisioning 资产；外部写者不受 flock 约束，所有放弃请求均转为人工处置。 */
   [[nodiscard]] ProjectProvisioningResult abandon(const QString &operationId) const;
 
   /** 读取 provisioning 页面所需的恢复状态；查询无持久化或文件系统副作用。 */
