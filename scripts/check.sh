@@ -8,7 +8,8 @@ BASE_REF=${BASE_REF:-origin/main}
 LLVM_BIN=${LLVM_BIN:-"$(brew --prefix llvm)/bin"}
 SDK_ROOT=${SDK_ROOT:-"$(xcrun --sdk macosx --show-sdk-path)"}
 . "$PROJECT_ROOT/toolchain.lock.sh"
-SQLITE_CLI=${SQLITE_CLI:-/usr/bin/sqlite3}
+SQLITE_ROOT=${SQLITE_ROOT:-"$(brew --prefix sqlite)"}
+SQLITE_CLI=${SQLITE_CLI:-"$SQLITE_ROOT/bin/sqlite3"}
 SOURCE_FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/personal-research-os-source-files.XXXXXX")
 trap 'rm -f "$SOURCE_FILE_LIST"' EXIT HUP INT TERM
 
@@ -37,8 +38,13 @@ if [ ! -x "$SQLITE_CLI" ]; then
 fi
 require_version SQLite "$PROS_SQLITE_VERSION" "$("$SQLITE_CLI" --version | awk '{print $1}')"
 
-cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-  -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -DSQLite3_ROOT="$SDK_ROOT/usr"
+PKG_CONFIG_PATH="$SQLITE_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+  cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -U 'SQLite3_*' -U 'PC_SQLite3_*'
+SQLITE_INCLUDE=$(sed -n 's/^SQLite3_INCLUDE_DIR:PATH=//p' "$BUILD_DIR/CMakeCache.txt")
+SQLITE_LIBRARY=$(sed -n 's/^SQLite3_LIBRARY:FILEPATH=//p' "$BUILD_DIR/CMakeCache.txt")
+case "$SQLITE_INCLUDE" in "$SQLITE_ROOT"/*) ;; *) echo "CMake 未使用受控 SQLite 头文件。" >&2; exit 1 ;; esac
+case "$SQLITE_LIBRARY" in "$SQLITE_ROOT"/*) ;; *) echo "CMake 未使用受控 SQLite 库。" >&2; exit 1 ;; esac
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
