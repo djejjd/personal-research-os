@@ -29,6 +29,7 @@ jobs:
     runs-on: macos-14
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -38,6 +39,15 @@ jobs:
         run: |
           echo 'CMake projects must provide scripts/check.sh.' >&2
           exit 1
+      - name: Pin Homebrew core revision
+        if: ${{ hashFiles('CMakeLists.txt') != '' }}
+        run: |
+          . ./toolchain.lock.sh
+          brew tap --force homebrew/core https://github.com/Homebrew/homebrew-core
+          core_repository="$(brew --repo homebrew/core)"
+          git -C "$core_repository" fetch --depth=1 origin "$PROS_HOMEBREW_CORE_REVISION"
+          git -C "$core_repository" checkout --detach "$PROS_HOMEBREW_CORE_REVISION"
+          test "$(git -C "$core_repository" rev-parse HEAD)" = "$PROS_HOMEBREW_CORE_REVISION"
       - name: Install locked build and static-analysis dependencies
         if: ${{ hashFiles('CMakeLists.txt') != '' }}
         run: brew bundle install --file Brewfile --no-upgrade

@@ -8,6 +8,7 @@ BASE_REF=${BASE_REF:-origin/main}
 LLVM_BIN=${LLVM_BIN:-"$(brew --prefix llvm)/bin"}
 SDK_ROOT=${SDK_ROOT:-"$(xcrun --sdk macosx --show-sdk-path)"}
 . "$PROJECT_ROOT/toolchain.lock.sh"
+SQLITE_CLI=${SQLITE_CLI:-/usr/bin/sqlite3}
 SOURCE_FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/personal-research-os-source-files.XXXXXX")
 trap 'rm -f "$SOURCE_FILE_LIST"' EXIT HUP INT TERM
 
@@ -30,10 +31,14 @@ require_version cmake "$PROS_CMAKE_VERSION" "$(cmake --version | sed -n '1s/.* /
 require_version ninja "$PROS_NINJA_VERSION" "$(ninja --version)"
 require_version Qt "$PROS_QT_VERSION" "$("$QT_ROOT/bin/qmake" -query QT_VERSION)"
 require_version LLVM "$PROS_LLVM_VERSION" "$("$LLVM_BIN/clang-tidy" --version | sed -n '1s/.*version \([0-9.]*\).*/\1/p')"
-require_version SQLite "$PROS_SQLITE_VERSION" "$(sqlite3 --version | awk '{print $1}')"
+if [ ! -x "$SQLITE_CLI" ]; then
+  echo "找不到受控 SQLite CLI：$SQLITE_CLI。" >&2
+  exit 1
+fi
+require_version SQLite "$PROS_SQLITE_VERSION" "$("$SQLITE_CLI" --version | awk '{print $1}')"
 
 cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-  -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT"
+  -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -DSQLite3_ROOT="$SDK_ROOT/usr"
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
