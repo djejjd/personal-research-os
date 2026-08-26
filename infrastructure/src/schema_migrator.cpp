@@ -146,7 +146,7 @@ const TableDefinition &fileOperationLogTable() {
   return table;
 }
 
-const TableDefinition &projectProvisioningTable() {
+const TableDefinition &projectProvisioningV5Table() {
   static const TableDefinition table{
       "project_provisioning_operations",
       "CREATE TABLE IF NOT EXISTS project_provisioning_operations (operation_id TEXT PRIMARY KEY, project_id TEXT NOT "
@@ -155,6 +155,24 @@ const TableDefinition &projectProvisioningTable() {
       "'ready', "
       "'failed')), failure_code TEXT, CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = "
       "'failed' AND failure_code IN ('asset_collision', 'manual_intervention_required', 'safe_abandoned'))));"};
+  return table;
+}
+
+const TableDefinition &projectProvisioningTable() {
+  static const TableDefinition table{
+      "project_provisioning_operations",
+      "CREATE TABLE IF NOT EXISTS project_provisioning_operations (operation_id TEXT PRIMARY KEY CHECK(length("
+      "operation_id) > 0), project_id TEXT NOT NULL UNIQUE CHECK(length(project_id) > 0), title TEXT NOT NULL, root_id "
+      "TEXT NOT NULL CHECK(length(root_id) > 0), authorization_revision INTEGER NOT NULL CHECK(authorization_revision "
+      ">= 1), root_device INTEGER NOT NULL CHECK(root_device >= 0), root_inode INTEGER NOT NULL CHECK(root_inode >= "
+      "0), "
+      "relative_path TEXT NOT NULL CHECK(length(relative_path) > 0), asset_device INTEGER, asset_inode INTEGER, "
+      "asset_digest TEXT CHECK(asset_digest IS NULL OR length(asset_digest) = 64), state TEXT NOT NULL CHECK(state IN "
+      "('provisioning', 'ready', 'failed')), failure_code TEXT, CHECK((asset_device IS NULL AND asset_inode IS NULL "
+      "AND "
+      "asset_digest IS NULL) OR (asset_device >= 0 AND asset_inode >= 0 AND length(asset_digest) = 64)), "
+      "CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = 'failed' AND failure_code IN "
+      "('asset_collision', 'manual_intervention_required', 'safe_abandoned'))));"};
   return table;
 }
 
@@ -381,8 +399,8 @@ bool ensureS2Schema(sqlite3 *database, QString *errorMessage) {
 
 bool ensureS3Schema(sqlite3 *database, QString *errorMessage) {
   if (!ensureS2Schema(database, errorMessage) ||
-      !execute(database, projectProvisioningTable().createSql, errorMessage) ||
-      !tableMatchesDefinition(database, projectProvisioningTable(), errorMessage)) {
+      !execute(database, projectProvisioningV5Table().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningV5Table(), errorMessage)) {
     return false;
   }
   for (const TableDefinition &table : reconcileTables()) {
@@ -430,6 +448,34 @@ bool migrateV4ToV5(sqlite3 *database, QString *errorMessage) {
          execute(database, fileOperationLogTable().createSql, errorMessage) &&
          tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) &&
          execute(database, "UPDATE schema_metadata SET schema_version = 5 WHERE schema_version = 4;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+/**
+ * 将 v5 的无根绑定 saga 表升级为 v6。
+ *
+ * v5 记录没有可验证的 root/authorization/identity 证据，含记录时拒绝提升版本而非猜测目录或删除项目；空表可原子重建。
+ */
+bool migrateV5ToV6(sqlite3 *database, QString *errorMessage) {
+  const auto count = queryRows(database, "SELECT COUNT(*) FROM project_provisioning_operations;", 1);
+  if (!count || *count != std::vector<std::string>{"0"}) {
+    if (errorMessage != nullptr)
+      *errorMessage = "旧版项目创建记录缺少资源证明，需要人工迁移";
+    return false;
+  }
+  if (!ensureS1Schema(database, errorMessage) || !execute(database, fileOperationLogTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) ||
+      !execute(database, projectProvisioningV5Table().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningV5Table(), errorMessage))
+    return false;
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return execute(database, "DROP TABLE project_provisioning_operations;", errorMessage) &&
+         execute(database, projectProvisioningTable().createSql, errorMessage) &&
+         tableMatchesDefinition(database, projectProvisioningTable(), errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 6 WHERE schema_version = 5;", errorMessage) &&
          sqlite3_changes(database) == 1;
 }
 
@@ -511,6 +557,8 @@ bool SchemaMigrator::migrate(const QString &databasePath, QString *errorMessage)
         migrated = migrateV3ToV4(database, errorMessage);
       } else if (*version == 4) {
         migrated = migrateV4ToV5(database, errorMessage);
+      } else if (*version == 5) {
+        migrated = migrateV5ToV6(database, errorMessage);
       } else {
         if (errorMessage != nullptr)
           *errorMessage = "不支持的 schema 版本";

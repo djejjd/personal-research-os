@@ -23,6 +23,7 @@ enum class ResourceRejectCode {
   access_denied,
   symlink_forbidden,
   resource_not_found,
+  resource_already_exists,
   resource_open_failed,
   resource_not_regular_file,
 };
@@ -135,6 +136,13 @@ struct ResourceRoot {
   ResourceAccess access = ResourceAccess::read_only;
 };
 
+/** 已授权根的可持久化物理证明；只用于后续受限操作的同一性校验。 */
+struct ResourceRootProof final {
+  QString id;
+  quint64 authorizationRevision = 0;
+  ResourceIdentity identity;
+};
+
 /** 根注册或撤销的结构化结果。 */
 struct ResourceRootResult {
   ResourceRejectCode rejection = ResourceRejectCode::none;
@@ -163,6 +171,21 @@ struct ResourceReplacementResult {
 struct ResourceListResult {
   ResourceRejectCode rejection = ResourceRejectCode::none;
   std::vector<QString> relativePaths;
+
+  [[nodiscard]] bool isAccepted() const;
+};
+
+/** 在受限根内排他创建普通文件的结果；成功时返回新文件的物理身份。 */
+struct ResourceCreateResult final {
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  std::optional<ResourceIdentity> identity;
+
+  [[nodiscard]] bool isAccepted() const;
+};
+
+/** 条件删除的结果；成功只表示同一受管文件已删除并同步目录。 */
+struct ResourceRemoveResult final {
+  ResourceRejectCode rejection = ResourceRejectCode::none;
 
   [[nodiscard]] bool isAccepted() const;
 };
@@ -197,6 +220,13 @@ public:
   [[nodiscard]] ResourceRootResult revokeRoot(const QString &rootId);
 
   /**
+   * 读取仍受当前 resolver 授权且 identity 未变化的根证明。
+   *
+   * @return 失败不访问根内资源；调用方应把 root ID、授权 revision 和 identity 一并持久化，恢复时逐项比对。
+   */
+  [[nodiscard]] std::optional<ResourceRootProof> rootProof(const QString &rootId) const;
+
+  /**
    * 解析并打开已授权根内的既有普通文件。
    *
    * 路径首先经语法校验，再复验目录 identity、根授权和访问范围；最后以目录句柄相对打开且不跟随链接，
@@ -213,6 +243,22 @@ public:
    */
   [[nodiscard]] ResourceReplacementResult openForAtomicReplacement(const QString &rootId, const QString &relativePath,
                                                                    const QString &operationId) const;
+
+  /**
+   * 在已授权可写根内以 `O_EXCL|O_NOFOLLOW` 创建并同步一个普通文件。
+   *
+   * @return 已存在时返回 `resource_already_exists`；失败不回退为路径拼接，也不会覆盖现有内容。
+   */
+  [[nodiscard]] ResourceCreateResult createExclusive(const QString &rootId, const QString &relativePath,
+                                                     const QByteArray &contents) const;
+
+  /**
+   * 仅当目标仍为 `expectedIdentity` 指定的普通文件时删除，并同步受限父目录。
+   *
+   * @return identity、授权或根证明任一不符时拒绝；不得据摘要或路径单独删除文件。
+   */
+  [[nodiscard]] ResourceRemoveResult removeIfIdentity(const QString &rootId, const QString &relativePath,
+                                                      ResourceIdentity expectedIdentity) const;
 
   /**
    * 枚举授权根内的普通文件相对路径。

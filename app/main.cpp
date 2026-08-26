@@ -2,6 +2,7 @@
 #include "pros/domain/schema_version.h"
 #include "pros/infrastructure/file_operation_log.h"
 #include "pros/infrastructure/local_data_directory.h"
+#include "pros/infrastructure/project_provisioning.h"
 #include "pros/infrastructure/resource_resolver.h"
 #include "pros/infrastructure/schema_migrator.h"
 
@@ -31,6 +32,8 @@ constexpr LogEventDefinition kDataDirectory{"storage.data_directory", "本地数
 constexpr LogEventDefinition kSchemaMigration{"storage.schema_migration", "本地 schema 迁移", "schema_migrator"};
 constexpr LogEventDefinition kSchemaVersion{"storage.schema_version", "本地 schema 版本读取", "schema_migrator"};
 constexpr LogEventDefinition kFileRecovery{"storage.file_recovery", "本地文件恢复扫描", "file_operation_log"};
+constexpr LogEventDefinition kProjectProvisioningRecovery{"storage.project_provisioning_recovery", "项目创建恢复扫描",
+                                                          "project_provisioning"};
 
 void logEvent(const LogEventDefinition &definition, const char *result, const char *level = "INFO",
               const char *reasonCode = nullptr) {
@@ -90,6 +93,16 @@ int main(int argc, char *argv[]) {
       return 1;
     }
     logEvent(kFileRecovery, "succeeded");
+
+    pros::infrastructure::ProjectProvisioningRecoveryCoordinator provisioningRecovery(databasePath, resourceResolver);
+    logEvent(kProjectProvisioningRecovery, "started");
+    const auto provisioningCode = provisioningRecovery.recoverPending();
+    if (provisioningCode != pros::infrastructure::ProjectProvisioningCode::none) {
+      logEvent(kProjectProvisioningRecovery, "failed", "ERROR",
+               pros::infrastructure::projectProvisioningCodeName(provisioningCode));
+      return 1;
+    }
+    logEvent(kProjectProvisioningRecovery, "succeeded");
 
     const int schemaVersion = migrator.schemaVersion(databasePath, &errorMessage);
     if (schemaVersion < 0) {

@@ -1,6 +1,7 @@
 #pragma once
 
-#include <QByteArray>
+#include "pros/infrastructure/resource_resolver.h"
+
 #include <QString>
 
 #include <optional>
@@ -16,19 +17,15 @@ enum class ProjectProvisioningCode {
   asset_collision,
   recovery_required,
   manual_intervention_required,
-  not_found,
+  not_found
 };
-
-/** 将项目创建结果码编码为稳定英文协议值；展示层不得依赖中文诊断判断分支。 */
 [[nodiscard]] const char *projectProvisioningCodeName(ProjectProvisioningCode code);
 
 /** 项目创建 saga 的可查询生命周期；与 Project 聚合的业务状态独立。 */
 enum class ProjectProvisioningState { provisioning, ready, failed };
-
 /** 仅用于故障注入，模拟资产基线已入账但尚未标记 ready 的可恢复中断。 */
 enum class ProjectProvisioningFault { none, after_asset_recorded };
 
-/** 创建一个项目及其首个 Markdown 资产所需的稳定输入。 */
 struct ProjectProvisioningRequest final {
   QString operationId;
   std::string projectId;
@@ -36,12 +33,10 @@ struct ProjectProvisioningRequest final {
   QString assetName;
 };
 
-/** saga 执行或放弃的结构化结果。 */
 struct ProjectProvisioningResult final {
   ProjectProvisioningCode code = ProjectProvisioningCode::storage_unavailable;
   QString operationId;
   ProjectProvisioningState state = ProjectProvisioningState::failed;
-
   [[nodiscard]] bool isSucceeded() const;
 };
 
@@ -55,7 +50,6 @@ struct ProjectProvisioningSnapshot final {
   QString failureCode;
 };
 
-/** provisioning 查询的结构化结果。 */
 struct ProjectProvisioningQueryResult final {
   ProjectProvisioningCode code = ProjectProvisioningCode::storage_unavailable;
   std::optional<ProjectProvisioningSnapshot> value;
@@ -64,44 +58,46 @@ struct ProjectProvisioningQueryResult final {
 /**
  * 项目首个受管资产的可恢复创建 saga。
  *
- * @pre `databasePath` 已迁移到当前 schema；`authorizedRootPath` 是已授权、存在且非软链接的本地目录。
- * @note 操作先持久化 provisioning 意图，再以 O_EXCL 创建单个 Markdown 资产并保存 SHA-256 创建基线。重复提交
- * 同一 operation_id 只会核验或推进同一资产，绝不会生成第二个对象。放弃仅删除本操作已记录且仍等于创建基线的文件；
- * 碰撞、基线不符或任何无法证明归属的状态都保留文件并要求人工处置。
+ * @pre `databasePath` 已迁移到当前 schema，`resolver` 存活且 `rootId` 已由调用方显式授权。
+ * @note 先持久化 root ID、授权 revision、根 identity 与相对路径；仅在同一受限根内的资产 identity 和摘要
+ * 均可证明时，才在 SQLite 事务中创建 active Project 并标记 ready。provisioning/failed 永不写入 projects。
  */
 class ProjectProvisioningSaga final {
 public:
   /** 构造不访问数据库或文件系统；故障注入仅供 FI-V01-PROJ-01 测试。 */
-  explicit ProjectProvisioningSaga(QString databasePath, QString authorizedRootPath,
+  explicit ProjectProvisioningSaga(QString databasePath, const ResourceResolver &resolver, QString rootId,
                                    ProjectProvisioningFault fault = ProjectProvisioningFault::none);
 
-  /**
-   * 创建或继续同一项目创建操作。
-   *
-   * @return ready 仅在资产基线与磁盘内容可证明一致时返回成功；碰撞和用户修改保持 failed 并保留资产。
-   * @note 同一 operation_id 的输入必须完全一致；同一调用可重复执行，因中断进入 provisioning 的操作会继续安全步骤。
-   */
+  /** 根证明、授权 revision、资产 identity 或内容不符时永久隔离操作；不切换目录或授权。 */
   [[nodiscard]] ProjectProvisioningResult provision(const ProjectProvisioningRequest &request) const;
 
-  /**
-   * 安全放弃尚未 ready 的创建操作。
-   *
-   * @return 仅删除本操作创建且仍等于创建 SHA-256 基线的资产；既有、丢失或已变化资产不会删除，并返回人工介入码。
-   * @note 重复放弃不创建或覆盖资产；ready 操作不能通过此接口撤销。
-   */
+  /** 仅删除同一受限根内、identity 和 SHA-256 创建基线均一致的资产；其他情况要求人工处置。 */
   [[nodiscard]] ProjectProvisioningResult abandon(const QString &operationId) const;
 
-  /**
-   * 读取 provisioning 页面所需的恢复状态。
-   *
-   * @return 找到时返回完整快照；查询无持久化或文件系统副作用，存储异常与未找到分别编码。
-   */
+  /** 读取 provisioning 页面所需的恢复状态；查询无持久化或文件系统副作用。 */
   [[nodiscard]] ProjectProvisioningQueryResult query(const QString &operationId) const;
 
 private:
   QString databasePath_;
-  QString authorizedRootPath_;
+  const ResourceResolver &resolver_;
+  QString rootId_;
   ProjectProvisioningFault fault_;
+};
+
+/**
+ * 在应用启动时扫描所有未决项目创建操作。
+ *
+ * @note 每项只能通过其持久化的 root ID 在同一 resolver 中恢复；缺失授权、根替换或证明不符会转为人工介入。
+ */
+class ProjectProvisioningRecoveryCoordinator final {
+public:
+  explicit ProjectProvisioningRecoveryCoordinator(QString databasePath, const ResourceResolver &resolver);
+  /** @return 仅存储故障阻断启动；不可证明项标记人工介入后继续扫描并返回 none。 */
+  [[nodiscard]] ProjectProvisioningCode recoverPending() const;
+
+private:
+  QString databasePath_;
+  const ResourceResolver &resolver_;
 };
 
 } // namespace pros::infrastructure

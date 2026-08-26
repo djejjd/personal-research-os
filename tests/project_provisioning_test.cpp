@@ -1,5 +1,6 @@
 #include "pros/infrastructure/project_provisioning.h"
 #include "pros/infrastructure/schema_migrator.h"
+#include "pros/infrastructure/sqlite_work_query_service.h"
 
 #include <QFile>
 #include <QTemporaryDir>
@@ -9,9 +10,12 @@ namespace {
 
 using pros::infrastructure::ProjectProvisioningCode;
 using pros::infrastructure::ProjectProvisioningFault;
+using pros::infrastructure::ProjectProvisioningRecoveryCoordinator;
 using pros::infrastructure::ProjectProvisioningRequest;
 using pros::infrastructure::ProjectProvisioningSaga;
 using pros::infrastructure::ProjectProvisioningState;
+using pros::infrastructure::ResourceAccess;
+using pros::infrastructure::ResourceResolver;
 using pros::infrastructure::SchemaMigrator;
 
 QString initializedDatabase(QTemporaryDir &directory) {
@@ -35,6 +39,17 @@ ProjectProvisioningRequest request(const QString &operationId = "provision-1") {
   return {operationId, "project-1", "研究项目", "project.md"};
 }
 
+QString registerWritableRoot(ResourceResolver &resolver, const QString &path) {
+  const auto root = resolver.registerRoot(path, ResourceAccess::read_write);
+  return root.isAccepted() ? root.root->id : QString{};
+}
+
+bool projectIsInvisible(const QString &databasePath, const std::string &projectId) {
+  QString error;
+  return pros::infrastructure::SqliteWorkQueryService(databasePath).project(projectId, &error).status() ==
+         pros::application::WorkQueryStatus::not_found;
+}
+
 } // namespace
 
 class ProjectProvisioningTest final : public QObject {
@@ -46,6 +61,8 @@ private slots:
   void retainsUserModifiedAssetAndRequiresManualIntervention_FI_V01_PROJ_01();
   void abandonsOnlyUnchangedOperationCreatedAsset_FI_V01_PROJ_01();
   void repeatsReadyOperationWithoutSecondAsset_FI_V01_PROJ_01();
+  void startupCoordinatorRecoversPendingAfterResolverRestart_FI_V01_PROJ_01();
+  void revokedRootRequiresManualInterventionAndKeepsProjectInvisible_FI_V01_PROJ_01();
 };
 
 void ProjectProvisioningTest::resumesInterruptedCreationWithSameOperationId_FI_V01_PROJ_01() {
@@ -54,11 +71,19 @@ void ProjectProvisioningTest::resumesInterruptedCreationWithSameOperationId_FI_V
   const QString databasePath = initializedDatabase(directory);
   QVERIFY(!databasePath.isEmpty());
   const ProjectProvisioningRequest operation = request();
-  ProjectProvisioningSaga interrupted(databasePath, directory.path(), ProjectProvisioningFault::after_asset_recorded);
+  ResourceResolver firstResolver;
+  const QString rootId = registerWritableRoot(firstResolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  ProjectProvisioningSaga interrupted(databasePath, firstResolver, rootId,
+                                      ProjectProvisioningFault::after_asset_recorded);
 
   QCOMPARE(interrupted.provision(operation).code, ProjectProvisioningCode::recovery_required);
   QVERIFY(QFile::exists(directory.filePath("project.md")));
-  const ProjectProvisioningSaga recovered(databasePath, directory.path());
+  QVERIFY(projectIsInvisible(databasePath, operation.projectId));
+  ResourceResolver restartedResolver;
+  const QString restartedRootId = registerWritableRoot(restartedResolver, directory.path());
+  QCOMPARE(restartedRootId, rootId);
+  const ProjectProvisioningSaga recovered(databasePath, restartedResolver, restartedRootId);
   const auto completed = recovered.provision(operation);
   QVERIFY(completed.isSucceeded());
   QCOMPARE(completed.state, ProjectProvisioningState::ready);
@@ -76,7 +101,8 @@ void ProjectProvisioningTest::retainsPreexistingAssetOnCollision_FI_V01_PROJ_01(
   const QString assetPath = directory.filePath("project.md");
   QVERIFY(writeFile(assetPath, "already exists"));
 
-  const ProjectProvisioningSaga saga(databasePath, directory.path());
+  ResourceResolver resolver;
+  const ProjectProvisioningSaga saga(databasePath, resolver, registerWritableRoot(resolver, directory.path()));
   QCOMPARE(saga.provision(request()).code, ProjectProvisioningCode::asset_collision);
   QCOMPARE(readFile(assetPath), QByteArray("already exists"));
   QCOMPARE(saga.abandon("provision-1").code, ProjectProvisioningCode::manual_intervention_required);
@@ -84,6 +110,7 @@ void ProjectProvisioningTest::retainsPreexistingAssetOnCollision_FI_V01_PROJ_01(
   const auto snapshot = saga.query("provision-1");
   QVERIFY(snapshot.value.has_value());
   QCOMPARE(snapshot.value.value_or({}).state, ProjectProvisioningState::failed);
+  QVERIFY(projectIsInvisible(databasePath, "project-1"));
 }
 
 void ProjectProvisioningTest::retainsUserModifiedAssetAndRequiresManualIntervention_FI_V01_PROJ_01() {
@@ -92,12 +119,14 @@ void ProjectProvisioningTest::retainsUserModifiedAssetAndRequiresManualIntervent
   const QString databasePath = initializedDatabase(directory);
   QVERIFY(!databasePath.isEmpty());
   const ProjectProvisioningRequest operation = request();
-  ProjectProvisioningSaga interrupted(databasePath, directory.path(), ProjectProvisioningFault::after_asset_recorded);
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  ProjectProvisioningSaga interrupted(databasePath, resolver, rootId, ProjectProvisioningFault::after_asset_recorded);
   QCOMPARE(interrupted.provision(operation).code, ProjectProvisioningCode::recovery_required);
   const QString assetPath = directory.filePath("project.md");
   QVERIFY(writeFile(assetPath, "user content"));
 
-  const ProjectProvisioningSaga recovered(databasePath, directory.path());
+  const ProjectProvisioningSaga recovered(databasePath, resolver, rootId);
   QCOMPARE(recovered.provision(operation).code, ProjectProvisioningCode::manual_intervention_required);
   QCOMPARE(recovered.abandon(operation.operationId).code, ProjectProvisioningCode::manual_intervention_required);
   QCOMPARE(readFile(assetPath), QByteArray("user content"));
@@ -109,16 +138,19 @@ void ProjectProvisioningTest::abandonsOnlyUnchangedOperationCreatedAsset_FI_V01_
   const QString databasePath = initializedDatabase(directory);
   QVERIFY(!databasePath.isEmpty());
   const ProjectProvisioningRequest operation = request();
-  ProjectProvisioningSaga interrupted(databasePath, directory.path(), ProjectProvisioningFault::after_asset_recorded);
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  ProjectProvisioningSaga interrupted(databasePath, resolver, rootId, ProjectProvisioningFault::after_asset_recorded);
   QCOMPARE(interrupted.provision(operation).code, ProjectProvisioningCode::recovery_required);
 
-  const ProjectProvisioningSaga saga(databasePath, directory.path());
+  const ProjectProvisioningSaga saga(databasePath, resolver, rootId);
   QVERIFY(saga.abandon(operation.operationId).isSucceeded());
   QVERIFY(!QFile::exists(directory.filePath("project.md")));
   const auto snapshot = saga.query(operation.operationId);
   QVERIFY(snapshot.value.has_value());
   QCOMPARE(snapshot.value.value_or({}).state, ProjectProvisioningState::failed);
   QCOMPARE(snapshot.value.value_or({}).failureCode, QString("safe_abandoned"));
+  QVERIFY(projectIsInvisible(databasePath, operation.projectId));
 }
 
 void ProjectProvisioningTest::repeatsReadyOperationWithoutSecondAsset_FI_V01_PROJ_01() {
@@ -126,7 +158,8 @@ void ProjectProvisioningTest::repeatsReadyOperationWithoutSecondAsset_FI_V01_PRO
   QVERIFY(directory.isValid());
   const QString databasePath = initializedDatabase(directory);
   QVERIFY(!databasePath.isEmpty());
-  const ProjectProvisioningSaga saga(databasePath, directory.path());
+  ResourceResolver resolver;
+  const ProjectProvisioningSaga saga(databasePath, resolver, registerWritableRoot(resolver, directory.path()));
   const ProjectProvisioningRequest operation = request();
 
   QVERIFY(saga.provision(operation).isSucceeded());
@@ -136,6 +169,49 @@ void ProjectProvisioningTest::repeatsReadyOperationWithoutSecondAsset_FI_V01_PRO
   QCOMPARE(saga.provision({"provision-1", "project-1", "研究项目", "another.md"}).code,
            ProjectProvisioningCode::invalid_argument);
   QVERIFY(!QFile::exists(directory.filePath("another.md")));
+}
+
+void ProjectProvisioningTest::startupCoordinatorRecoversPendingAfterResolverRestart_FI_V01_PROJ_01() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  ResourceResolver initialResolver;
+  const QString rootId = registerWritableRoot(initialResolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  const ProjectProvisioningRequest operation = request("restart-coordinator");
+  QCOMPARE(
+      ProjectProvisioningSaga(databasePath, initialResolver, rootId, ProjectProvisioningFault::after_asset_recorded)
+          .provision(operation)
+          .code,
+      ProjectProvisioningCode::recovery_required);
+  QVERIFY(projectIsInvisible(databasePath, operation.projectId));
+
+  ResourceResolver restartedResolver;
+  QCOMPARE(registerWritableRoot(restartedResolver, directory.path()), rootId);
+  QCOMPARE(ProjectProvisioningRecoveryCoordinator(databasePath, restartedResolver).recoverPending(),
+           ProjectProvisioningCode::none);
+  QVERIFY(!projectIsInvisible(databasePath, operation.projectId));
+}
+
+void ProjectProvisioningTest::revokedRootRequiresManualInterventionAndKeepsProjectInvisible_FI_V01_PROJ_01() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  const ProjectProvisioningRequest operation = request("revoked-root");
+  QCOMPARE(ProjectProvisioningSaga(databasePath, resolver, rootId, ProjectProvisioningFault::after_asset_recorded)
+               .provision(operation)
+               .code,
+           ProjectProvisioningCode::recovery_required);
+  QVERIFY(resolver.revokeRoot(rootId).isAccepted());
+  QCOMPARE(ProjectProvisioningSaga(databasePath, resolver, rootId).provision(operation).code,
+           ProjectProvisioningCode::manual_intervention_required);
+  QVERIFY(projectIsInvisible(databasePath, operation.projectId));
+  QVERIFY(QFile::exists(directory.filePath(operation.assetName)));
 }
 
 QTEST_APPLESS_MAIN(ProjectProvisioningTest)

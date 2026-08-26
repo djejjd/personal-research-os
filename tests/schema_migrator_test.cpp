@@ -83,6 +83,8 @@ private slots:
   void rejectsGappedDeliveryPositionsInCurrentSchema();
   void bindsApprovalToExactPlanRevisionAndDigest();
   void rejectsAmbiguousMetadataWhenReadingVersion();
+  void upgradesEmptyV5DatabaseToV6();
+  void rejectsV5ProvisioningRecordsWithoutResourceProof();
 };
 
 void SchemaMigratorTest::createsCompleteSchemaFromEmptyDatabase() {
@@ -141,11 +143,51 @@ void SchemaMigratorTest::rejectsUnsupportedOrAmbiguousMetadata() {
   pros::infrastructure::SchemaMigrator migrator;
   QString error;
   const QString future = directory.path() + "/future.sqlite";
-  createMetadata(future, "(6)");
+  createMetadata(future, "(7)");
   QVERIFY(!migrator.migrate(future, &error));
   const QString duplicate = directory.path() + "/duplicate.sqlite";
   createMetadata(duplicate, "(1), (1)");
   QVERIFY(!migrator.migrate(duplicate, &error));
+}
+
+void SchemaMigratorTest::upgradesEmptyV5DatabaseToV6() {
+  QTemporaryDir directory;
+  const QString path = directory.path() + "/v5-empty.sqlite";
+  pros::infrastructure::SchemaMigrator migrator;
+  QString error;
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QVERIFY(executeSql(
+      path, "UPDATE schema_metadata SET schema_version = 5; DROP TABLE project_provisioning_operations; "
+            "CREATE TABLE project_provisioning_operations (operation_id TEXT PRIMARY KEY, project_id TEXT NOT "
+            "NULL UNIQUE REFERENCES projects(id), title TEXT NOT NULL, asset_name TEXT NOT NULL, asset_digest TEXT "
+            "CHECK(asset_digest IS NULL OR length(asset_digest) = 64), state TEXT NOT NULL CHECK(state IN "
+            "('provisioning', 'ready', 'failed')), failure_code TEXT, CHECK((state IN ('provisioning', 'ready') "
+            "AND failure_code IS NULL) OR (state = 'failed' AND failure_code IN ('asset_collision', "
+            "'manual_intervention_required', 'safe_abandoned'))));"));
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QCOMPARE(migrator.schemaVersion(path, &error), pros::domain::kCurrentSchemaVersion);
+}
+
+void SchemaMigratorTest::rejectsV5ProvisioningRecordsWithoutResourceProof() {
+  QTemporaryDir directory;
+  const QString path = directory.path() + "/v5-record.sqlite";
+  pros::infrastructure::SchemaMigrator migrator;
+  QString error;
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QVERIFY(executeSql(
+      path,
+      "PRAGMA foreign_keys=ON; INSERT INTO projects(id,title,status,revision) VALUES "
+      "('legacy-project','Legacy',0,1); UPDATE schema_metadata SET schema_version = 5; "
+      "DROP TABLE project_provisioning_operations; CREATE TABLE project_provisioning_operations "
+      "(operation_id TEXT PRIMARY KEY, project_id TEXT NOT NULL UNIQUE REFERENCES projects(id), title TEXT NOT "
+      "NULL, asset_name TEXT NOT NULL, asset_digest TEXT CHECK(asset_digest IS NULL OR length(asset_digest) = 64), "
+      "state TEXT NOT NULL CHECK(state IN ('provisioning', 'ready', 'failed')), failure_code TEXT, "
+      "CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = 'failed' AND "
+      "failure_code IN ('asset_collision', 'manual_intervention_required', 'safe_abandoned')))); "
+      "INSERT INTO project_provisioning_operations VALUES('legacy-op','legacy-project','Legacy','legacy.md',"
+      "NULL,'provisioning',NULL);"));
+  QVERIFY(!migrator.migrate(path, &error));
+  QCOMPARE(migrator.schemaVersion(path, &error), 5);
 }
 
 void SchemaMigratorTest::rejectsDamagedV1SchemaWithoutPromotingVersion() {
