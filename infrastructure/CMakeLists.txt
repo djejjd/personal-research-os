@@ -2,6 +2,7 @@ add_library(pros_infrastructure STATIC
   src/command_composition.cpp
   src/governance_composition.cpp
   src/local_data_directory.cpp
+  src/resource_resolver.cpp
   src/schema_migrator.cpp
   src/sqlite_approval_command_handler.cpp
   src/sqlite_command_transaction.cpp
