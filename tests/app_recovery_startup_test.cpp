@@ -22,14 +22,15 @@ void AppRecoveryStartupTest::startsWhenPendingProvisioningRootRequiresFreshAutho
   pros::infrastructure::ResourceResolver resolver;
   const auto root = resolver.registerRoot(directory.path(), pros::infrastructure::ResourceAccess::read_write);
   QVERIFY(root.isAccepted());
+  const QString rootId = root.root.has_value() ? root.root->id : QString();
+  QVERIFY(!rootId.isEmpty());
   const pros::infrastructure::ProjectProvisioningRequest request{"startup-pending", "startup-project", "启动恢复",
                                                                  "startup-project.md"};
-  QCOMPARE(
-      pros::infrastructure::ProjectProvisioningSaga(
-          databasePath, resolver, root.root->id, pros::infrastructure::ProjectProvisioningFault::after_asset_recorded)
-          .provision(request)
-          .code,
-      pros::infrastructure::ProjectProvisioningCode::recovery_required);
+  QCOMPARE(pros::infrastructure::ProjectProvisioningSaga(
+               databasePath, resolver, rootId, pros::infrastructure::ProjectProvisioningFault::after_asset_recorded)
+               .provision(request)
+               .code,
+           pros::infrastructure::ProjectProvisioningCode::recovery_required);
 
   QProcess application;
   QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
