@@ -3,6 +3,9 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  push:
+    branches-ignore: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -16,10 +19,14 @@ jobs:
         with:
           fetch-depth: 0
       - name: Verify whitespace
-        run: git diff --check origin/${{ github.base_ref }}...HEAD
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || 'main' }}
+        run: git diff --check origin/$BASE_REF...HEAD
       - name: Reject private documents
+        env:
+          BASE_REF: ${{ github.event_name == 'pull_request' && github.base_ref || 'main' }}
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -Eq '^(docs/|scripts/docs/)'; then
+          if git diff --name-only origin/$BASE_REF...HEAD | grep -Eq '^(docs/|scripts/docs/)'; then
             echo 'docs/ and scripts/docs/ contain local private design records and cannot be submitted.' >&2
             exit 1
           fi
