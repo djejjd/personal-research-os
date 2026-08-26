@@ -1,6 +1,7 @@
 #include "pros/infrastructure/resource_resolver.h"
 
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QUuid>
 
@@ -8,6 +9,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cerrno>
@@ -112,6 +114,8 @@ std::optional<QStringList> relativeComponents(const QString &relativePath, Resou
 }
 
 ResourceOpenResult rejectedOpen(ResourceRejectCode rejection) { return {.rejection = rejection, .handle = nullptr}; }
+
+ResourceListResult rejectedList(ResourceRejectCode rejection) { return {.rejection = rejection, .relativePaths = {}}; }
 
 ResourceRootResult rejectedRoot(ResourceRejectCode rejection) { return {.rejection = rejection, .root = std::nullopt}; }
 
@@ -223,8 +227,8 @@ const char *resourceRejectCodeName(ResourceRejectCode code) {
   return "resource_open_failed";
 }
 
-ResourceHandle::ResourceHandle(std::shared_ptr<ResourceRootState> root, int descriptor)
-    : root_(std::move(root)), descriptor_(descriptor) {}
+ResourceHandle::ResourceHandle(std::shared_ptr<ResourceRootState> root, int descriptor, ResourceIdentity identity)
+    : root_(std::move(root)), descriptor_(descriptor), identity_(identity) {}
 
 ResourceHandle::~ResourceHandle() {
   if (descriptor_ >= 0)
@@ -273,9 +277,13 @@ bool ResourceHandle::readAll(QByteArray *contents, ResourceRejectCode *rejection
   return true;
 }
 
+ResourceIdentity ResourceHandle::identity() const { return identity_; }
+
 bool ResourceRootResult::isAccepted() const { return root.has_value() && rejection == ResourceRejectCode::none; }
 
 bool ResourceOpenResult::isAccepted() const { return handle != nullptr && rejection == ResourceRejectCode::none; }
+
+bool ResourceListResult::isAccepted() const { return rejection == ResourceRejectCode::none; }
 
 ResourceResolver::ResourceResolver() : impl_(std::make_unique<Impl>()) {}
 
@@ -377,7 +385,44 @@ ResourceOpenResult ResourceResolver::resolveAndOpen(const QString &rootId, const
   if (const auto rootRejection = verifyRootIdentity(*root); rootRejection.has_value())
     return rejectedOpen(*rootRejection);
   return {.rejection = ResourceRejectCode::none,
-          .handle = std::unique_ptr<ResourceHandle>(new ResourceHandle(root, resource.release()))};
+          .handle = std::unique_ptr<ResourceHandle>(
+              new ResourceHandle(root, resource.release(),
+                                 ResourceIdentity{.device = static_cast<quint64>(status.st_dev),
+                                                  .inode = static_cast<quint64>(status.st_ino)}))};
+}
+
+ResourceListResult ResourceResolver::listRegularFiles(const QString &rootId) const {
+  std::shared_ptr<ResourceRootState> root;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->roots.find(rootId);
+    if (found == impl_->roots.end())
+      return rejectedList(ResourceRejectCode::root_not_found);
+    root = found->second;
+  }
+  if (root->revoked.load())
+    return rejectedList(ResourceRejectCode::root_revoked);
+  if (const auto rootRejection = verifyRootIdentity(*root); rootRejection.has_value())
+    return rejectedList(*rootRejection);
+
+  std::vector<QString> paths;
+  QDirIterator iterator(root->canonicalPath, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+  while (iterator.hasNext()) {
+    const QString absolutePath = iterator.next();
+    const QFileInfo information(absolutePath);
+    if (!information.isFile() || information.isSymLink())
+      continue;
+    const QString relativePath = QDir(root->canonicalPath).relativeFilePath(absolutePath);
+    ResourceRejectCode rejection = ResourceRejectCode::none;
+    if (relativeComponents(relativePath, &rejection).has_value())
+      paths.push_back(relativePath);
+  }
+  if (root->revoked.load())
+    return rejectedList(ResourceRejectCode::root_revoked);
+  if (const auto rootRejection = verifyRootIdentity(*root); rootRejection.has_value())
+    return rejectedList(*rootRejection);
+  std::ranges::sort(paths, [](const QString &left, const QString &right) { return left.toUtf8() < right.toUtf8(); });
+  return {.rejection = ResourceRejectCode::none, .relativePaths = std::move(paths)};
 }
 
 } // namespace pros::infrastructure

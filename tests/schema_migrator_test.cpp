@@ -98,6 +98,8 @@ void SchemaMigratorTest::createsCompleteSchemaFromEmptyDatabase() {
         "governance_acceptance", "governance_acceptance_evidence", "operation_plans", "approvals", "file_operation_log",
         "project_provisioning_operations"})
     QVERIFY(tableExists(path, table));
+  for (const char *table : {"document_registry", "watcher_event_queue", "reconcile_operations", "reconcile_health"})
+    QVERIFY(tableExists(path, table));
 }
 
 void SchemaMigratorTest::canRunCurrentMigrationMoreThanOnce() {

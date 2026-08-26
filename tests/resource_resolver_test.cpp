@@ -45,6 +45,7 @@ private slots:
   void rejectsRootReplacedByLink();
   void rejectsOverlappingAndWriteSymlinkRoots();
   void deniesWriteOnReadOnlyRoot();
+  void listsOnlyAuthorizedNonSymlinkFiles();
   void exposesStableRejectCodeNames();
 };
 
@@ -207,6 +208,27 @@ void ResourceResolverTest::deniesWriteOnReadOnlyRoot() {
   QVERIFY(root.isAccepted());
   QCOMPARE(resolver.resolveAndOpen(acceptedRootId(root), "entry.md", ResourceOpenMode::read_write).rejection,
            ResourceRejectCode::access_denied);
+}
+
+void ResourceResolverTest::listsOnlyAuthorizedNonSymlinkFiles() {
+  QTemporaryDir rootDirectory;
+  QTemporaryDir outsideDirectory;
+  QVERIFY(rootDirectory.isValid());
+  QVERIFY(outsideDirectory.isValid());
+  QVERIFY(QDir().mkpath(rootDirectory.path() + "/nested"));
+  QVERIFY(writeFile(rootDirectory.path() + "/nested/entry.md", "body"));
+  QVERIFY(writeFile(outsideDirectory.path() + "/outside.md", "outside"));
+  QVERIFY(QFile::link(outsideDirectory.path() + "/outside.md", rootDirectory.path() + "/linked.md"));
+
+  ResourceResolver resolver;
+  const auto root = resolver.registerRoot(rootDirectory.path(), ResourceAccess::read_only);
+  QVERIFY(root.isAccepted());
+  const auto listed = resolver.listRegularFiles(acceptedRootId(root));
+  QVERIFY(listed.isAccepted());
+  QCOMPARE(listed.relativePaths, std::vector<QString>{QString("nested/entry.md")});
+
+  QVERIFY(resolver.revokeRoot(acceptedRootId(root)).isAccepted());
+  QCOMPARE(resolver.listRegularFiles(acceptedRootId(root)).rejection, ResourceRejectCode::root_revoked);
 }
 
 void ResourceResolverTest::exposesStableRejectCodeNames() {

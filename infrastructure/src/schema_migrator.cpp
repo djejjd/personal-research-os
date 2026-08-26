@@ -144,6 +144,31 @@ const TableDefinition &projectProvisioningTable() {
   return table;
 }
 
+const std::array<TableDefinition, 4> &reconcileTables() {
+  static const std::array<TableDefinition, 4> tables{{
+      {"document_registry",
+       "CREATE TABLE IF NOT EXISTS document_registry (document_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "relative_path TEXT NOT NULL, device INTEGER NOT NULL CHECK(device >= 0), inode INTEGER NOT NULL CHECK(inode >= "
+       "0), "
+       "content_digest TEXT NOT NULL CHECK(length(content_digest) = 64), content_revision INTEGER NOT NULL "
+       "CHECK(content_revision >= 1), state TEXT NOT NULL CHECK(state IN ('active', 'tombstoned', 'conflict')), "
+       "UNIQUE(root_id, relative_path), UNIQUE(root_id, device, inode));"},
+      {"watcher_event_queue",
+       "CREATE TABLE IF NOT EXISTS watcher_event_queue (event_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "relative_path TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued', 'reconciled')));"},
+      {"reconcile_operations",
+       "CREATE TABLE IF NOT EXISTS reconcile_operations (operation_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "result_code TEXT NOT NULL CHECK(result_code IN ('none', 'resource_unavailable', 'identity_conflict')), "
+       "health TEXT NOT NULL CHECK(health IN ('ready', 'unavailable', 'conflict')), resource_rejection TEXT NOT NULL, "
+       "updated_count INTEGER NOT NULL CHECK(updated_count >= 0), tombstoned_count INTEGER NOT NULL "
+       "CHECK(tombstoned_count >= 0), conflict_count INTEGER NOT NULL CHECK(conflict_count >= 0));"},
+      {"reconcile_health",
+       "CREATE TABLE IF NOT EXISTS reconcile_health (root_id TEXT PRIMARY KEY, health TEXT NOT NULL "
+       "CHECK(health IN ('ready', 'stale', 'unavailable', 'conflict')), resource_rejection TEXT NOT NULL);"},
+  }};
+  return tables;
+}
+
 std::optional<std::vector<std::string>> queryRows(sqlite3 *database, const std::string &sql, int columnCount) {
   sqlite3_stmt *rawStatement = nullptr;
   if (sqlite3_prepare_v2(database, sql.c_str(), -1, &rawStatement, nullptr) != SQLITE_OK)
@@ -340,9 +365,16 @@ bool ensureS2Schema(sqlite3 *database, QString *errorMessage) {
 }
 
 bool ensureS3Schema(sqlite3 *database, QString *errorMessage) {
-  return ensureS2Schema(database, errorMessage) &&
-         execute(database, projectProvisioningTable().createSql, errorMessage) &&
-         tableMatchesDefinition(database, projectProvisioningTable(), errorMessage);
+  if (!ensureS2Schema(database, errorMessage) ||
+      !execute(database, projectProvisioningTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningTable(), errorMessage)) {
+    return false;
+  }
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return true;
 }
 
 bool migrateV1ToV2(sqlite3 *database, QString *errorMessage) {

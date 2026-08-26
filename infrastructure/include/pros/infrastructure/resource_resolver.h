@@ -3,8 +3,10 @@
 #include <QByteArray>
 #include <QString>
 
+#include <compare>
 #include <memory>
 #include <optional>
+#include <vector>
 
 namespace pros::infrastructure {
 
@@ -36,6 +38,14 @@ enum class ResourceOpenMode { read_only, read_write };
 
 struct ResourceRootState;
 
+/** 授权根内普通文件的稳定物理身份；不暴露其物理路径。 */
+struct ResourceIdentity final {
+  quint64 device = 0;
+  quint64 inode = 0;
+
+  auto operator<=>(const ResourceIdentity &) const = default;
+};
+
 /**
  * 已打开资源的受限句柄。
  *
@@ -58,13 +68,17 @@ public:
    */
   [[nodiscard]] bool readAll(QByteArray *contents, ResourceRejectCode *rejection = nullptr) const;
 
+  /** 返回打开时已复验的普通文件身份；不访问文件系统，重复调用结果不变。 */
+  [[nodiscard]] ResourceIdentity identity() const;
+
 private:
   friend class ResourceResolver;
 
-  ResourceHandle(std::shared_ptr<ResourceRootState> root, int descriptor);
+  ResourceHandle(std::shared_ptr<ResourceRootState> root, int descriptor, ResourceIdentity identity);
 
   std::shared_ptr<ResourceRootState> root_;
   int descriptor_;
+  ResourceIdentity identity_;
 };
 
 /** 根注册成功后返回的稳定标识与授权 revision。 */
@@ -86,6 +100,14 @@ struct ResourceRootResult {
 struct ResourceOpenResult {
   ResourceRejectCode rejection = ResourceRejectCode::none;
   std::unique_ptr<ResourceHandle> handle;
+
+  [[nodiscard]] bool isAccepted() const;
+};
+
+/** 授权根内普通文件的受限枚举结果；路径始终相对于已授权根。 */
+struct ResourceListResult {
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  std::vector<QString> relativePaths;
 
   [[nodiscard]] bool isAccepted() const;
 };
@@ -127,6 +149,15 @@ public:
    */
   [[nodiscard]] ResourceOpenResult resolveAndOpen(const QString &rootId, const QString &relativePath,
                                                   ResourceOpenMode mode) const;
+
+  /**
+   * 枚举授权根内的普通文件相对路径。
+   *
+   * @return 仅在根授权和目录身份持续有效时返回结果；软链接不会作为结果返回。调用方仍必须通过
+   * `resolveAndOpen` 打开每个路径，以处理枚举后的竞态、撤权和文件替换。
+   * @note 此操作不读取文件内容，不接受调用方提供的物理路径，结果顺序按 UTF-8 字节序稳定。
+   */
+  [[nodiscard]] ResourceListResult listRegularFiles(const QString &rootId) const;
 
 private:
   struct Impl;
