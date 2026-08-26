@@ -1,5 +1,6 @@
 # Private design records are kept locally until prepared for public release.
 /docs/
+/scripts/docs/
 
 # macOS and editors
 .DS_Store
