@@ -229,9 +229,15 @@ bool readRegularAt(const ResourceRootState &root, int parentDescriptor, const QS
   const QByteArray encodedName = QFile::encodeName(name);
   FileDescriptor descriptor(openat(parentDescriptor, encodedName.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
   struct stat status{};
-  if (!descriptor.isValid() || fstat(descriptor.value, &status) != 0 || !S_ISREG(status.st_mode)) {
-    *rejection = descriptor.isValid() && !S_ISREG(status.st_mode) ? ResourceRejectCode::resource_not_regular_file
-                                                                  : ResourceRejectCode::resource_open_failed;
+  if (!descriptor.isValid()) {
+    *rejection = errno == ELOOP    ? ResourceRejectCode::symlink_forbidden
+                 : errno == ENOENT ? ResourceRejectCode::resource_not_found
+                                   : ResourceRejectCode::resource_open_failed;
+    return false;
+  }
+  if (fstat(descriptor.value, &status) != 0 || !S_ISREG(status.st_mode)) {
+    *rejection = !S_ISREG(status.st_mode) ? ResourceRejectCode::resource_not_regular_file
+                                          : ResourceRejectCode::resource_open_failed;
     return false;
   }
   QByteArray result;
