@@ -47,7 +47,7 @@ jobs:
           git -C "$brew_repository" fetch --depth=1 origin "$PROS_HOMEBREW_REVISION"
           git -C "$brew_repository" checkout --force --detach "$PROS_HOMEBREW_REVISION"
           test "$(git -C "$brew_repository" rev-parse HEAD)" = "$PROS_HOMEBREW_REVISION"
-          test "$(brew --version | head -1)" = "Homebrew $PROS_HOMEBREW_VERSION"
+          test "$(brew --version | sed -n '1p')" = "Homebrew $PROS_HOMEBREW_VERSION"
           brew tap --force homebrew/core https://github.com/Homebrew/homebrew-core
           core_repository="$(brew --repo homebrew/core)"
           git -C "$core_repository" fetch --depth=1 origin "$PROS_HOMEBREW_CORE_REVISION"
