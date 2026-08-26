@@ -46,7 +46,7 @@ jobs:
           brew tap --force homebrew/core https://github.com/Homebrew/homebrew-core
           core_repository="$(brew --repo homebrew/core)"
           git -C "$core_repository" fetch --depth=1 origin "$PROS_HOMEBREW_CORE_REVISION"
-          git -C "$core_repository" checkout --detach "$PROS_HOMEBREW_CORE_REVISION"
+          git -C "$core_repository" checkout --force --detach "$PROS_HOMEBREW_CORE_REVISION"
           test "$(git -C "$core_repository" rev-parse HEAD)" = "$PROS_HOMEBREW_CORE_REVISION"
       - name: Install locked build and static-analysis dependencies
         if: ${{ hashFiles('CMakeLists.txt') != '' }}
