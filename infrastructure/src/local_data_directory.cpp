@@ -9,14 +9,14 @@ bool LocalDataDirectory::ensureExists(const QString &path, QString *errorMessage
   const QFileInfo target(path);
   if (target.exists() && !target.isDir()) {
     if (errorMessage != nullptr) {
-      *errorMessage = QString("数据目录路径不是目录：%1").arg(path);
+      *errorMessage = "数据目录路径不是目录";
     }
     return false;
   }
 
   if (!QDir().mkpath(path)) {
     if (errorMessage != nullptr) {
-      *errorMessage = QString("无法创建数据目录：%1").arg(path);
+      *errorMessage = "无法创建数据目录";
     }
     return false;
   }
@@ -24,7 +24,7 @@ bool LocalDataDirectory::ensureExists(const QString &path, QString *errorMessage
   const QFileInfo created(path);
   if (!created.isWritable()) {
     if (errorMessage != nullptr) {
-      *errorMessage = QString("数据目录不可写：%1").arg(path);
+      *errorMessage = "数据目录不可写";
     }
     return false;
   }

@@ -17,7 +17,7 @@ bool execute(sqlite3 *database, const char *statement, QString *errorMessage) {
   }
 
   if (errorMessage != nullptr) {
-    *errorMessage = QString::fromUtf8(sqliteError == nullptr ? sqlite3_errmsg(database) : sqliteError);
+    *errorMessage = "数据库迁移操作失败";
   }
   sqlite3_free(sqliteError);
   return false;
@@ -64,7 +64,7 @@ bool SchemaMigrator::migrate(const QString &databasePath, QString *errorMessage)
   if (sqlite3_open_v2(encodedPath.constData(), &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr) !=
       SQLITE_OK) {
     if (errorMessage != nullptr) {
-      *errorMessage = QString::fromUtf8(database == nullptr ? "无法打开数据库" : sqlite3_errmsg(database));
+      *errorMessage = "无法打开本地数据库";
     }
     closeDatabase(database);
     return false;
@@ -101,7 +101,7 @@ int SchemaMigrator::schemaVersion(const QString &databasePath, QString *errorMes
   const QByteArray encodedPath = databasePath.toUtf8();
   if (sqlite3_open_v2(encodedPath.constData(), &database, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
     if (errorMessage != nullptr) {
-      *errorMessage = QString::fromUtf8(database == nullptr ? "无法读取数据库" : sqlite3_errmsg(database));
+      *errorMessage = "无法读取本地数据库";
     }
     closeDatabase(database);
     return -1;

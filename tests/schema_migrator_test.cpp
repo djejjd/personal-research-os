@@ -1,6 +1,7 @@
 #include "pros/domain/schema_version.h"
 #include "pros/infrastructure/schema_migrator.h"
 
+#include <QDir>
 #include <QTemporaryDir>
 #include <QtTest>
 
@@ -57,9 +58,13 @@ void SchemaMigratorTest::rejectsDirectoryAsDatabasePath() {
   QVERIFY(temporaryDirectory.isValid());
   pros::infrastructure::SchemaMigrator migrator;
   QString errorMessage;
+  const QString sensitiveDirectory = temporaryDirectory.path() + "/token_sk_example_sensitive_note_body";
+  QVERIFY(QDir().mkpath(sensitiveDirectory));
 
-  QVERIFY(!migrator.migrate(temporaryDirectory.path(), &errorMessage));
+  QVERIFY(!migrator.migrate(sensitiveDirectory, &errorMessage));
   QVERIFY(!errorMessage.isEmpty());
+  QVERIFY(!errorMessage.contains(sensitiveDirectory));
+  QVERIFY(!errorMessage.contains("sk_example_sensitive_note_body"));
 }
 
 void SchemaMigratorTest::rejectsUnsupportedOrAmbiguousMetadata() {

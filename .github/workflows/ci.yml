@@ -19,14 +19,16 @@ jobs:
         run: git diff --check origin/${{ github.base_ref }}...HEAD
       - name: Reject private documents
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '^docs/'; then
-            echo 'docs/ contains local private design records and cannot be submitted.' >&2
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -Eq '^(docs/|scripts/docs/)'; then
+            echo 'docs/ and scripts/docs/ contain local private design records and cannot be submitted.' >&2
             exit 1
           fi
 
   build-and-test:
     name: Build and test
     runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -36,9 +38,9 @@ jobs:
         run: |
           echo 'CMake projects must provide scripts/check.sh.' >&2
           exit 1
-      - name: Install build and static-analysis dependencies
+      - name: Install locked build and static-analysis dependencies
         if: ${{ hashFiles('CMakeLists.txt') != '' }}
-        run: brew install cmake ninja qt llvm
+        run: brew bundle install --file Brewfile --no-upgrade
       - name: Run local check entrypoint
         if: ${{ hashFiles('scripts/check.sh') != '' }}
         run: scripts/check.sh

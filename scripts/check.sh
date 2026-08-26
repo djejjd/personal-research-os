@@ -7,6 +7,7 @@ QT_ROOT=${QT_ROOT:-/opt/homebrew/opt/qt}
 BASE_REF=${BASE_REF:-origin/main}
 LLVM_BIN=${LLVM_BIN:-"$(brew --prefix llvm)/bin"}
 SDK_ROOT=${SDK_ROOT:-"$(xcrun --sdk macosx --show-sdk-path)"}
+. "$PROJECT_ROOT/toolchain.lock.sh"
 SOURCE_FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/personal-research-os-source-files.XXXXXX")
 trap 'rm -f "$SOURCE_FILE_LIST"' EXIT HUP INT TERM
 
@@ -14,6 +15,22 @@ if [ ! -x "$LLVM_BIN/clang-format" ] || [ ! -x "$LLVM_BIN/clang-tidy" ]; then
   echo "clang-format 和 clang-tidy 是必需的 S0 门禁。" >&2
   exit 1
 fi
+
+require_version() {
+  tool_name=$1
+  expected_version=$2
+  actual_version=$3
+  if [ "$actual_version" != "$expected_version" ]; then
+    echo "$tool_name 版本不符合 toolchain.lock.sh：期望 $expected_version，实际 $actual_version。" >&2
+    exit 1
+  fi
+}
+
+require_version cmake "$PROS_CMAKE_VERSION" "$(cmake --version | sed -n '1s/.* //p')"
+require_version ninja "$PROS_NINJA_VERSION" "$(ninja --version)"
+require_version Qt "$PROS_QT_VERSION" "$("$QT_ROOT/bin/qmake" -query QT_VERSION)"
+require_version LLVM "$PROS_LLVM_VERSION" "$("$LLVM_BIN/clang-tidy" --version | sed -n '1s/.*version \([0-9.]*\).*/\1/p')"
+require_version SQLite "$PROS_SQLITE_VERSION" "$(sqlite3 --version | awk '{print $1}')"
 
 cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
   -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT"
@@ -51,6 +68,14 @@ if git -C "$PROJECT_ROOT" diff | grep -n -E -i "$SECRET_PATTERN"; then
 fi
 if git -C "$PROJECT_ROOT" diff --cached | grep -n -E -i "$SECRET_PATTERN"; then
   exit 1
+fi
+if [ -s "$SOURCE_FILE_LIST" ]; then
+  while IFS= read -r candidate_file; do
+    [ -f "$PROJECT_ROOT/$candidate_file" ] || continue
+    if grep -n -E -i "$SECRET_PATTERN" -- "$PROJECT_ROOT/$candidate_file"; then
+      exit 1
+    fi
+  done <"$SOURCE_FILE_LIST"
 fi
 
 if [ -f "$PROJECT_ROOT/docs/README.md" ] && [ -f "$PROJECT_ROOT/scripts/docs/check-docs.mjs" ]; then

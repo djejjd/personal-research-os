@@ -28,7 +28,7 @@ void LocalDataDirectoryTest::createsMissingDirectory() {
 void LocalDataDirectoryTest::rejectsFileAsDirectory() {
   QTemporaryDir temporaryDirectory;
   QVERIFY(temporaryDirectory.isValid());
-  const QString filePath = temporaryDirectory.path() + "/not-a-directory";
+  const QString filePath = temporaryDirectory.path() + "/token_sk_example_sensitive_note_body";
   QFile file(filePath);
   QVERIFY(file.open(QIODevice::WriteOnly));
   file.close();
@@ -38,6 +38,8 @@ void LocalDataDirectoryTest::rejectsFileAsDirectory() {
 
   QVERIFY(!dataDirectory.ensureExists(filePath, &errorMessage));
   QVERIFY(!errorMessage.isEmpty());
+  QVERIFY(!errorMessage.contains(filePath));
+  QVERIFY(!errorMessage.contains("sk_example_sensitive_note_body"));
 }
 
 QTEST_APPLESS_MAIN(LocalDataDirectoryTest)
