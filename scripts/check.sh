@@ -7,6 +7,7 @@ QT_ROOT=${QT_ROOT:-/opt/homebrew/opt/qt}
 BASE_REF=${BASE_REF:-origin/main}
 LLVM_BIN=${LLVM_BIN:-"$(brew --prefix llvm)/bin"}
 SDK_ROOT=${SDK_ROOT:-"$(xcrun --sdk macosx --show-sdk-path)"}
+SQLITE_ROOT=${SQLITE_ROOT:-"$(brew --prefix sqlite)"}
 SOURCE_FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/personal-research-os-source-files.XXXXXX")
 trap 'rm -f "$SOURCE_FILE_LIST"' EXIT HUP INT TERM
 
@@ -15,8 +16,9 @@ if [ ! -x "$LLVM_BIN/clang-format" ] || [ ! -x "$LLVM_BIN/clang-tidy" ]; then
   exit 1
 fi
 
-cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-  -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT"
+PKG_CONFIG_PATH="$SQLITE_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
+  cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
+    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -U 'SQLite3_*' -U 'PC_SQLite3_*'
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
