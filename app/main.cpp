@@ -1,4 +1,5 @@
 #include "pros/application/app_config.h"
+#include "pros/domain/schema_version.h"
 #include "pros/infrastructure/local_data_directory.h"
 #include "pros/infrastructure/schema_migrator.h"
 
@@ -39,7 +40,7 @@ void logEvent(const LogEventDefinition &definition, const char *result, const ch
                     {"module", QString::fromLatin1(definition.module)},
                     {"result", QString::fromLatin1(result)},
                     {"app_version", "0.1.0-dev"},
-                    {"schema_version", 1},
+                    {"schema_version", pros::domain::kCurrentSchemaVersion},
                     {"process_instance_id", processInstanceId},
                     {"sequence", static_cast<qint64>(++sequence)}};
   if (reasonCode != nullptr) {
