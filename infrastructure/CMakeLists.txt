@@ -3,6 +3,7 @@ add_library(pros_infrastructure STATIC
   src/document_reconciler.cpp
   src/file_operation_log.cpp
   src/governance_composition.cpp
+  src/knowledge_index.cpp
   src/local_data_directory.cpp
   src/markdown_fidelity.cpp
   src/project_provisioning.cpp

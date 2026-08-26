@@ -61,6 +61,23 @@ bool executeSql(const QString &path, const QString &sql) {
   sqlite3_close(database);
   return succeeded;
 }
+
+QString queryScalar(const QString &path, const QString &sql) {
+  sqlite3 *database = nullptr;
+  if (sqlite3_open_v2(path.toUtf8().constData(), &database, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK)
+    return {};
+  sqlite3_stmt *statement = nullptr;
+  if (sqlite3_prepare_v2(database, sql.toUtf8().constData(), -1, &statement, nullptr) != SQLITE_OK) {
+    sqlite3_close(database);
+    return {};
+  }
+  QString result;
+  if (sqlite3_step(statement) == SQLITE_ROW && sqlite3_column_type(statement, 0) == SQLITE_TEXT)
+    result = QString::fromUtf8(reinterpret_cast<const char *>(sqlite3_column_text(statement, 0)));
+  sqlite3_finalize(statement);
+  sqlite3_close(database);
+  return result;
+}
 } // namespace
 
 class SchemaMigratorTest final : public QObject {
@@ -85,6 +102,8 @@ private slots:
   void rejectsAmbiguousMetadataWhenReadingVersion();
   void upgradesEmptyV5DatabaseToV6();
   void rejectsV5ProvisioningRecordsWithoutResourceProof();
+  void backfillsV6DocumentFactsIntoContinuousKnowledgeWatermark();
+  void rejectsDamagedKnowledgeSourceTriggerInCurrentSchema();
 };
 
 void SchemaMigratorTest::createsCompleteSchemaFromEmptyDatabase() {
@@ -101,6 +120,9 @@ void SchemaMigratorTest::createsCompleteSchemaFromEmptyDatabase() {
         "project_provisioning_operations"})
     QVERIFY(tableExists(path, table));
   for (const char *table : {"document_registry", "watcher_event_queue", "reconcile_operations", "reconcile_health"})
+    QVERIFY(tableExists(path, table));
+  for (const char *table : {"knowledge_source_events", "knowledge_projection_state", "knowledge_projection_documents",
+                            "knowledge_projection_tags", "knowledge_projection_links"})
     QVERIFY(tableExists(path, table));
 }
 
@@ -143,7 +165,7 @@ void SchemaMigratorTest::rejectsUnsupportedOrAmbiguousMetadata() {
   pros::infrastructure::SchemaMigrator migrator;
   QString error;
   const QString future = directory.path() + "/future.sqlite";
-  createMetadata(future, "(7)");
+  createMetadata(future, QString("(%1)").arg(pros::domain::kCurrentSchemaVersion + 1));
   QVERIFY(!migrator.migrate(future, &error));
   const QString duplicate = directory.path() + "/duplicate.sqlite";
   createMetadata(duplicate, "(1), (1)");
@@ -188,6 +210,54 @@ void SchemaMigratorTest::rejectsV5ProvisioningRecordsWithoutResourceProof() {
       "NULL,'provisioning',NULL);"));
   QVERIFY(!migrator.migrate(path, &error));
   QCOMPARE(migrator.schemaVersion(path, &error), 5);
+}
+
+void SchemaMigratorTest::backfillsV6DocumentFactsIntoContinuousKnowledgeWatermark() {
+  QTemporaryDir directory;
+  const QString path = directory.path() + "/v6-knowledge.sqlite";
+  pros::infrastructure::SchemaMigrator migrator;
+  QString error;
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QVERIFY(executeSql(path,
+                     "PRAGMA foreign_keys=OFF; DROP TRIGGER knowledge_source_event_after_insert; "
+                     "DROP TRIGGER knowledge_source_event_after_update; DROP TABLE knowledge_projection_links; "
+                     "DROP TABLE knowledge_projection_tags; DROP TABLE knowledge_projection_documents; "
+                     "DROP TABLE knowledge_projection_state; DROP TABLE knowledge_source_events; "
+                     "UPDATE schema_metadata SET schema_version = 6; INSERT INTO document_registry "
+                     "(document_id, root_id, relative_path, device, inode, content_digest, content_revision, state) "
+                     "VALUES ('legacy-document', 'root-1', 'legacy.md', 1, 1, "
+                     "'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 'active');"));
+
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QCOMPARE(migrator.schemaVersion(path, &error), pros::domain::kCurrentSchemaVersion);
+  QCOMPARE(queryScalar(path,
+                       "SELECT CAST(generation AS TEXT) || '|' || health || '|' || "
+                       "CAST(checkpoint_position AS TEXT) || '|' || CAST(target_position AS TEXT) || '|' || reason "
+                       "FROM knowledge_projection_state;"),
+           QString("0|stale|0|1|not_built"));
+  QCOMPARE(queryScalar(path, "SELECT group_concat(position, '|') FROM (SELECT position FROM knowledge_source_events "
+                             "ORDER BY position);"),
+           QString("1"));
+  QVERIFY(executeSql(path, "UPDATE document_registry SET content_digest = "
+                           "'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', content_revision = 2 "
+                           "WHERE document_id = 'legacy-document';"));
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QCOMPARE(queryScalar(path, "SELECT group_concat(position, '|') FROM (SELECT position FROM knowledge_source_events "
+                             "ORDER BY position);"),
+           QString("1|2"));
+}
+
+void SchemaMigratorTest::rejectsDamagedKnowledgeSourceTriggerInCurrentSchema() {
+  QTemporaryDir directory;
+  const QString path = directory.path() + "/damaged-knowledge-trigger.sqlite";
+  pros::infrastructure::SchemaMigrator migrator;
+  QString error;
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QVERIFY(executeSql(path, "DROP TRIGGER knowledge_source_event_after_update; "
+                           "CREATE TRIGGER knowledge_source_event_after_update AFTER UPDATE ON document_registry "
+                           "BEGIN SELECT 1; END;"));
+  QVERIFY(!migrator.migrate(path, &error));
+  QCOMPARE(migrator.schemaVersion(path, &error), pros::domain::kCurrentSchemaVersion);
 }
 
 void SchemaMigratorTest::rejectsDamagedV1SchemaWithoutPromotingVersion() {
