@@ -735,6 +735,54 @@ ResourceRemoveResult ResourceResolver::removeIfIdentity(const QString &rootId, c
   return {.rejection = ResourceRejectCode::none};
 }
 
+ResourceRemoveResult ResourceResolver::removeIfIdentityAndDigest(const QString &rootId, const QString &relativePath,
+                                                                 ResourceIdentity expectedIdentity,
+                                                                 const QByteArray &expectedDigest) const {
+  if (expectedDigest.size() != 64)
+    return rejectedRemove(ResourceRejectCode::resource_open_failed);
+  std::shared_ptr<ResourceRootState> root;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->roots.find(rootId);
+    if (found == impl_->roots.end())
+      return rejectedRemove(ResourceRejectCode::root_not_found);
+    root = found->second;
+  }
+  if (root->access != ResourceAccess::read_write)
+    return rejectedRemove(ResourceRejectCode::access_denied);
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  if (!verifyUsableRoot(*root, &rejection))
+    return rejectedRemove(rejection);
+  const auto components = relativeComponents(relativePath, &rejection);
+  if (!components)
+    return rejectedRemove(rejection);
+  FileDescriptor rootDirectory = openDirectory(*root, &rejection);
+  if (!rootDirectory.isValid())
+    return rejectedRemove(rejection);
+  FileDescriptor parent = openParentDirectory(std::move(rootDirectory), *components, &rejection);
+  if (!parent.isValid())
+    return rejectedRemove(rejection);
+  const QByteArray name = QFile::encodeName(components->back());
+  const QString lockName = "." + components->back() + ".pros.lock";
+  FileDescriptor lockDescriptor(
+      openat(parent.value, QFile::encodeName(lockName).constData(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600));
+  if (!lockDescriptor.isValid() || flock(lockDescriptor.value, LOCK_EX) != 0)
+    return rejectedRemove(ResourceRejectCode::resource_open_failed);
+  QByteArray contents;
+  if (!readRegularAt(*root, parent.value, components->back(), &contents, &rejection) ||
+      QCryptographicHash::hash(contents, QCryptographicHash::Sha256).toHex() != expectedDigest)
+    return rejectedRemove(rejection == ResourceRejectCode::none ? ResourceRejectCode::resource_open_failed : rejection);
+  struct stat status{};
+  if (fstatat(parent.value, name.constData(), &status, AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG(status.st_mode) ||
+      static_cast<quint64>(status.st_dev) != expectedIdentity.device ||
+      static_cast<quint64>(status.st_ino) != expectedIdentity.inode)
+    return rejectedRemove(ResourceRejectCode::resource_open_failed);
+  if (unlinkat(parent.value, name.constData(), 0) != 0 || fsync(parent.value) != 0 ||
+      !verifyUsableRoot(*root, &rejection))
+    return rejectedRemove(rejection == ResourceRejectCode::none ? ResourceRejectCode::resource_open_failed : rejection);
+  return {.rejection = ResourceRejectCode::none};
+}
+
 ResourceListResult ResourceResolver::listRegularFiles(const QString &rootId) const {
   std::shared_ptr<ResourceRootState> root;
   {

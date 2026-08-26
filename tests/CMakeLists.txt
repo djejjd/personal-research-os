@@ -14,6 +14,7 @@ add_pros_test(resource_resolver_test resource_resolver_test.cpp)
 target_compile_definitions(markdown_fidelity_test PRIVATE PROS_V01_KNOW_05_FIXTURE="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/v01-know-05.md")
 add_pros_test(schema_migrator_test schema_migrator_test.cpp)
 add_pros_test(app_log_contract_test app_log_contract_test.cpp)
+add_pros_test(app_recovery_startup_test app_recovery_startup_test.cpp)
 add_pros_test(command_contract_test command_contract_test.cpp)
 add_pros_test(command_facade_test command_facade_test.cpp)
 add_pros_test(document_reconciler_test document_reconciler_test.cpp)
@@ -23,6 +24,8 @@ add_pros_test(sqlite_command_transaction_test sqlite_command_transaction_test.cp
 add_pros_test(sqlite_work_command_handler_test sqlite_work_command_handler_test.cpp)
 add_dependencies(app_log_contract_test personal_research_os)
 target_compile_definitions(app_log_contract_test PRIVATE PROS_APP_EXECUTABLE="$<TARGET_FILE:personal_research_os>")
+add_dependencies(app_recovery_startup_test personal_research_os)
+target_compile_definitions(app_recovery_startup_test PRIVATE PROS_APP_EXECUTABLE="$<TARGET_FILE:personal_research_os>")
 
 add_test(NAME s1_architecture_test
   COMMAND ${CMAKE_COMMAND} -DPROS_SOURCE_DIR=${PROJECT_SOURCE_DIR} -P ${CMAKE_CURRENT_SOURCE_DIR}/check_s1_architecture.cmake)

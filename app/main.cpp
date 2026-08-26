@@ -90,9 +90,8 @@ int main(int argc, char *argv[]) {
     const pros::infrastructure::FileRecoveryReport recovery = fileOperationLog.recoverPending(resourceResolver);
     if (!recovery.isSucceeded()) {
       logEvent(kFileRecovery, "failed", "ERROR", pros::infrastructure::fileOperationCodeName(recovery.code));
-      return 1;
-    }
-    logEvent(kFileRecovery, "succeeded");
+    } else
+      logEvent(kFileRecovery, "succeeded");
 
     pros::infrastructure::ProjectProvisioningRecoveryCoordinator provisioningRecovery(databasePath, resourceResolver);
     logEvent(kProjectProvisioningRecovery, "started");
@@ -100,9 +99,8 @@ int main(int argc, char *argv[]) {
     if (provisioningCode != pros::infrastructure::ProjectProvisioningCode::none) {
       logEvent(kProjectProvisioningRecovery, "failed", "ERROR",
                pros::infrastructure::projectProvisioningCodeName(provisioningCode));
-      return 1;
-    }
-    logEvent(kProjectProvisioningRecovery, "succeeded");
+    } else
+      logEvent(kProjectProvisioningRecovery, "succeeded");
 
     const int schemaVersion = migrator.schemaVersion(databasePath, &errorMessage);
     if (schemaVersion < 0) {

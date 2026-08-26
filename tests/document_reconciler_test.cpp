@@ -9,6 +9,10 @@
 
 #include <cstdlib>
 
+#include <array>
+#include <barrier>
+#include <thread>
+
 namespace {
 
 bool writeFile(const QString &path, const QByteArray &contents) {
@@ -44,6 +48,7 @@ private slots:
   void reconcilesExternalEditMoveDeleteAndOperationReplay_V01_KNOW_02_03();
   void ignoresReplayedAndOutOfOrderWatcherSignals_V01_KNOW_02_03();
   void exposesUnavailableRootHealthWithoutChangingRegisteredFact();
+  void serializesConcurrentSameOperationIdReplay();
 };
 
 void DocumentReconcilerTest::reconcilesExternalEditMoveDeleteAndOperationReplay_V01_KNOW_02_03() {
@@ -181,6 +186,40 @@ void DocumentReconcilerTest::exposesUnavailableRootHealthWithoutChangingRegister
   const auto &unchangedDocument = requireDocument(document);
   QVERIFY(!unchangedDocument.tombstoned);
   QCOMPARE(unchangedDocument.contentRevision, quint64(1));
+}
+
+void DocumentReconcilerTest::serializesConcurrentSameOperationIdReplay() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  const QString rootPath = directory.path() + "/notes";
+  QVERIFY(QDir().mkpath(rootPath));
+  QVERIFY(writeFile(rootPath + "/entry.md", "before"));
+  pros::infrastructure::ResourceResolver resolver;
+  const auto root = resolver.registerRoot(rootPath, pros::infrastructure::ResourceAccess::read_only);
+  QVERIFY(root.isAccepted());
+  pros::infrastructure::DocumentReconciler reconciler(databasePath, resolver);
+  QVERIFY(reconciler.registerDocument("doc-concurrent", rootId(root), "entry.md").isSucceeded());
+  QVERIFY(writeFile(rootPath + "/entry.md", "after"));
+  QCOMPARE(reconciler.enqueueRawEvent({"watch-concurrent", rootId(root), "entry.md"}),
+           pros::infrastructure::ReconcileCode::none);
+  std::barrier start(3);
+  std::array<pros::infrastructure::ReconcileResult, 2> results;
+  std::array<std::thread, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::thread([&, index] {
+      start.arrive_and_wait();
+      results[index] = reconciler.reconcile(rootId(root), "same-operation");
+    });
+  }
+  start.arrive_and_wait();
+  for (std::thread &worker : workers)
+    worker.join();
+  QCOMPARE(results[0].code, pros::infrastructure::ReconcileCode::none);
+  QCOMPARE(results[1].code, pros::infrastructure::ReconcileCode::none);
+  QCOMPARE(results[0].updatedDocumentCount, 1);
+  QCOMPARE(results[1].updatedDocumentCount, 1);
 }
 
 QTEST_APPLESS_MAIN(DocumentReconcilerTest)

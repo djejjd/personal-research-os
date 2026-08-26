@@ -6,6 +6,10 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <array>
+#include <barrier>
+#include <thread>
+
 namespace {
 
 using pros::infrastructure::ProjectProvisioningCode;
@@ -63,6 +67,7 @@ private slots:
   void repeatsReadyOperationWithoutSecondAsset_FI_V01_PROJ_01();
   void startupCoordinatorRecoversPendingAfterResolverRestart_FI_V01_PROJ_01();
   void revokedRootRequiresManualInterventionAndKeepsProjectInvisible_FI_V01_PROJ_01();
+  void serializesConcurrentSameOperationIdReplay();
 };
 
 void ProjectProvisioningTest::resumesInterruptedCreationWithSameOperationId_FI_V01_PROJ_01() {
@@ -212,6 +217,32 @@ void ProjectProvisioningTest::revokedRootRequiresManualInterventionAndKeepsProje
            ProjectProvisioningCode::manual_intervention_required);
   QVERIFY(projectIsInvisible(databasePath, operation.projectId));
   QVERIFY(QFile::exists(directory.filePath(operation.assetName)));
+}
+
+void ProjectProvisioningTest::serializesConcurrentSameOperationIdReplay() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  std::barrier start(3);
+  std::array<ProjectProvisioningCode, 2> results{};
+  std::array<std::thread, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::thread([&, index] {
+      start.arrive_and_wait();
+      results[index] =
+          ProjectProvisioningSaga(databasePath, resolver, rootId).provision(request("same-operation")).code;
+    });
+  }
+  start.arrive_and_wait();
+  for (std::thread &worker : workers)
+    worker.join();
+  QCOMPARE(results[0], ProjectProvisioningCode::none);
+  QCOMPARE(results[1], ProjectProvisioningCode::none);
+  QVERIFY(!projectIsInvisible(databasePath, "project-1"));
 }
 
 QTEST_APPLESS_MAIN(ProjectProvisioningTest)

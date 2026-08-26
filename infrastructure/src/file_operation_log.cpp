@@ -296,28 +296,36 @@ FileOperationResult FileOperationLog::replaceIfUnchanged(const ResourceResolver 
   const auto database = openDatabase(databasePath_);
   if (!database)
     return {FileOperationCode::storage_unavailable, operationId};
+  if (sqlite3_exec(database->get(), "BEGIN IMMEDIATE;", nullptr, nullptr, nullptr) != SQLITE_OK)
+    return {FileOperationCode::storage_unavailable, operationId};
+  const auto finish = [&database, &operationId](FileOperationResult result) {
+    if (sqlite3_exec(database->get(), "COMMIT;", nullptr, nullptr, nullptr) == SQLITE_OK)
+      return result;
+    sqlite3_exec(database->get(), "ROLLBACK;", nullptr, nullptr, nullptr);
+    return FileOperationResult{FileOperationCode::storage_unavailable, operationId};
+  };
   auto stored = readOperation(database->get(), operationId);
   if (!stored)
-    return {FileOperationCode::storage_unavailable, operationId};
+    return finish({FileOperationCode::storage_unavailable, operationId});
   if (!stored->has_value()) {
     const PendingOperation prepared{operationId, rootId, relativePath, expectedBaselineSha256, replacementDigest,
                                     "prepared",  {}};
     if (!insertPrepared(database->get(), prepared)) {
       stored = readOperation(database->get(), operationId);
       if (!stored || !stored->has_value())
-        return {FileOperationCode::storage_unavailable, operationId};
+        return finish({FileOperationCode::storage_unavailable, operationId});
     } else {
       stored = prepared;
     }
   }
   if (!stored || !stored->has_value())
-    return {FileOperationCode::storage_unavailable, operationId};
+    return finish({FileOperationCode::storage_unavailable, operationId});
   const PendingOperation &operation = stored->value();
   if (!sameIntent(operation, rootId, relativePath, expectedBaselineSha256, replacementDigest))
-    return {FileOperationCode::operation_id_conflict, operationId};
+    return finish({FileOperationCode::operation_id_conflict, operationId});
   if (operation.state != "prepared")
-    return persistedResult(operation);
-  return executePrepared(database->get(), resolver, operation, replacementContents, fault_);
+    return finish(persistedResult(operation));
+  return finish(executePrepared(database->get(), resolver, operation, replacementContents, fault_));
 }
 
 FileRecoveryReport FileOperationLog::recoverPending(const ResourceResolver &resolver) const {

@@ -298,6 +298,17 @@ std::optional<ReconcileOperationRow> loadOperation(sqlite3 *database, const QStr
   return ReconcileOperationRow{*parsedCode, *parsedHealth, *parsedRejection, updated, tombstoned, conflicts};
 }
 
+/** 将已持久化的协调结果还原为调用方可重放的响应，不重新扫描或修改资源。 */
+ReconcileResult replayedOperation(const ReconcileOperationRow &operation, const QString &operationId) {
+  return {.code = operation.code,
+          .health = operation.health,
+          .resourceRejection = operation.resourceRejection,
+          .operationId = operationId,
+          .updatedDocumentCount = operation.updated,
+          .tombstonedDocumentCount = operation.tombstoned,
+          .conflictDocumentCount = operation.conflicts};
+}
+
 bool markQueuedEventsReconciled(sqlite3 *database, const QString &rootId) {
   sqlite3_stmt *raw = nullptr;
   constexpr const char *sql =
@@ -533,13 +544,7 @@ ReconcileResult DocumentReconciler::reconcile(const QString &rootId, const QStri
   if (const auto previous = loadOperation(database->get(), operationId, &operationRoot); previous.has_value()) {
     if (operationRoot != rootId)
       return {.code = ReconcileCode::invalid_argument, .health = ReconcileHealth::stale, .operationId = operationId};
-    return {.code = previous->code,
-            .health = previous->health,
-            .resourceRejection = previous->resourceRejection,
-            .operationId = operationId,
-            .updatedDocumentCount = previous->updated,
-            .tombstonedDocumentCount = previous->tombstoned,
-            .conflictDocumentCount = previous->conflicts};
+    return replayedOperation(*previous, operationId);
   }
 
   ResourceRejectCode scanRejection = ResourceRejectCode::none;
@@ -549,8 +554,22 @@ ReconcileResult DocumentReconciler::reconcile(const QString &rootId, const QStri
                            .health = ReconcileHealth::unavailable,
                            .resourceRejection = scanRejection,
                            .operationId = operationId};
-    if (!execute(database->get(), "BEGIN IMMEDIATE;") ||
-        !updateHealth(database->get(), rootId, result.health, scanRejection) ||
+    if (!execute(database->get(), "BEGIN IMMEDIATE;"))
+      return {.code = ReconcileCode::storage_unavailable,
+              .health = ReconcileHealth::unavailable,
+              .operationId = operationId};
+    operationRoot.clear();
+    if (const auto previous = loadOperation(database->get(), operationId, &operationRoot); previous.has_value()) {
+      if (!execute(database->get(), "COMMIT;"))
+        return {.code = ReconcileCode::storage_unavailable,
+                .health = ReconcileHealth::unavailable,
+                .operationId = operationId};
+      return operationRoot == rootId ? replayedOperation(*previous, operationId)
+                                     : ReconcileResult{.code = ReconcileCode::invalid_argument,
+                                                       .health = ReconcileHealth::stale,
+                                                       .operationId = operationId};
+    }
+    if (!updateHealth(database->get(), rootId, result.health, scanRejection) ||
         !recordOperation(database->get(), operationId, rootId, result) || !execute(database->get(), "COMMIT;")) {
       execute(database->get(), "ROLLBACK;");
       return {.code = ReconcileCode::storage_unavailable,
@@ -563,6 +582,17 @@ ReconcileResult DocumentReconciler::reconcile(const QString &rootId, const QStri
   if (!execute(database->get(), "BEGIN IMMEDIATE;"))
     return {
         .code = ReconcileCode::storage_unavailable, .health = ReconcileHealth::unavailable, .operationId = operationId};
+  operationRoot.clear();
+  if (const auto previous = loadOperation(database->get(), operationId, &operationRoot); previous.has_value()) {
+    if (!execute(database->get(), "COMMIT;"))
+      return {.code = ReconcileCode::storage_unavailable,
+              .health = ReconcileHealth::unavailable,
+              .operationId = operationId};
+    return operationRoot == rootId ? replayedOperation(*previous, operationId)
+                                   : ReconcileResult{.code = ReconcileCode::invalid_argument,
+                                                     .health = ReconcileHealth::stale,
+                                                     .operationId = operationId};
+  }
   const auto rows = loadDocuments(database->get(), rootId);
   if (!rows) {
     execute(database->get(), "ROLLBACK;");

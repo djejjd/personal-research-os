@@ -210,8 +210,6 @@ bool recordAssetProof(sqlite3 *database, const Record &record, ResourceIdentity 
          sqlite3_changes(database) == 1;
 }
 bool activateProject(sqlite3 *database, const Record &record) {
-  if (!execute(database, "BEGIN IMMEDIATE;"))
-    return false;
   sqlite3_stmt *projectRaw = nullptr;
   sqlite3_stmt *operationRaw = nullptr;
   const bool prepared =
@@ -227,11 +225,7 @@ bool activateProject(sqlite3 *database, const Record &record) {
                        bindText(project.get(), 2, record.title) && sqlite3_step(project.get()) == SQLITE_DONE &&
                        bindText(operation.get(), 1, record.operationId) &&
                        sqlite3_step(operation.get()) == SQLITE_DONE && sqlite3_changes(database) == 1;
-  if (!written) {
-    execute(database, "ROLLBACK;");
-    return false;
-  }
-  return execute(database, "COMMIT;");
+  return written;
 }
 bool rootMatches(const ResourceRootProof &proof, const Record &record) {
   return proof.id == record.rootId && proof.authorizationRevision == record.authorizationRevision &&
@@ -304,34 +298,46 @@ ProjectProvisioningResult ProjectProvisioningSaga::provision(const ProjectProvis
   const auto database = openDatabase(databasePath_, SQLITE_OPEN_READWRITE);
   if (!database)
     return {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed};
+  if (!execute(database->get(), "BEGIN IMMEDIATE;"))
+    return {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed};
+  const auto finish = [&database, &request](ProjectProvisioningResult result) {
+    if (execute(database->get(), "COMMIT;"))
+      return result;
+    execute(database->get(), "ROLLBACK;");
+    return ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, request.operationId,
+                                     ProjectProvisioningState::provisioning};
+  };
   bool found = false;
   auto loaded = readRecord(database->get(), request.operationId, &found);
   if (!loaded)
-    return {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed};
+    return finish(
+        {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed});
   if (!found) {
     const auto proof = resolver_.rootProof(rootId_);
     if (!proof || !createInitialRecord(database->get(), request, *proof))
-      return {proof ? ProjectProvisioningCode::storage_unavailable
-                    : ProjectProvisioningCode::manual_intervention_required,
-              request.operationId, ProjectProvisioningState::failed};
+      return finish(
+          {proof ? ProjectProvisioningCode::storage_unavailable : ProjectProvisioningCode::manual_intervention_required,
+           request.operationId, ProjectProvisioningState::failed});
     loaded = readRecord(database->get(), request.operationId, &found);
     if (!loaded || !found)
-      return {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed};
+      return finish(
+          {ProjectProvisioningCode::storage_unavailable, request.operationId, ProjectProvisioningState::failed});
   }
   Record record = *loaded;
   if (record.projectId != request.projectId || record.title != request.title || record.assetName != request.assetName ||
       record.rootId != rootId_)
-    return {ProjectProvisioningCode::invalid_argument, request.operationId, record.state};
+    return finish({ProjectProvisioningCode::invalid_argument, request.operationId, record.state});
   if (record.state == ProjectProvisioningState::ready)
-    return {ProjectProvisioningCode::none, record.operationId, record.state};
+    return finish({ProjectProvisioningCode::none, record.operationId, record.state});
   if (record.state == ProjectProvisioningState::failed)
-    return failure(record.failureCode == "asset_collision" ? ProjectProvisioningCode::asset_collision
-                                                           : ProjectProvisioningCode::manual_intervention_required,
-                   record);
+    return finish(failure(record.failureCode == "asset_collision"
+                              ? ProjectProvisioningCode::asset_collision
+                              : ProjectProvisioningCode::manual_intervention_required,
+                          record));
   const auto proof = resolver_.rootProof(record.rootId);
   if (!proof || !rootMatches(*proof, record)) {
     markFailure(database->get(), record, "manual_intervention_required");
-    return failure(ProjectProvisioningCode::manual_intervention_required, record);
+    return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
   }
   if (!record.assetIdentity) {
     const QByteArray contents = "# " + QByteArray::fromStdString(record.title) + "\n";
@@ -340,26 +346,28 @@ ProjectProvisioningResult ProjectProvisioningSaga::provision(const ProjectProvis
     if (!created.isAccepted()) {
       const bool collision = created.rejection == ResourceRejectCode::resource_already_exists;
       markFailure(database->get(), record, collision ? "asset_collision" : "manual_intervention_required");
-      return failure(collision ? ProjectProvisioningCode::asset_collision
-                               : ProjectProvisioningCode::manual_intervention_required,
-                     record);
+      return finish(failure(collision ? ProjectProvisioningCode::asset_collision
+                                      : ProjectProvisioningCode::manual_intervention_required,
+                            record));
     }
     if (!recordAssetProof(database->get(), record, *created.identity, digest))
-      return {ProjectProvisioningCode::storage_unavailable, record.operationId, ProjectProvisioningState::provisioning};
+      return finish(
+          {ProjectProvisioningCode::storage_unavailable, record.operationId, ProjectProvisioningState::provisioning});
     record.assetIdentity = created.identity;
     record.assetDigest = digest;
     if (fault_ == ProjectProvisioningFault::after_asset_recorded)
-      return {ProjectProvisioningCode::recovery_required, record.operationId, ProjectProvisioningState::provisioning};
+      return finish(
+          {ProjectProvisioningCode::recovery_required, record.operationId, ProjectProvisioningState::provisioning});
   }
   if (!readAndProveAsset(resolver_, record)) {
     markFailure(database->get(), record, "manual_intervention_required");
-    return failure(ProjectProvisioningCode::manual_intervention_required, record);
+    return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
   }
-  return activateProject(database->get(), record)
-             ? ProjectProvisioningResult{ProjectProvisioningCode::none, record.operationId,
-                                         ProjectProvisioningState::ready}
-             : ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, record.operationId,
-                                         ProjectProvisioningState::provisioning};
+  return finish(activateProject(database->get(), record)
+                    ? ProjectProvisioningResult{ProjectProvisioningCode::none, record.operationId,
+                                                ProjectProvisioningState::ready}
+                    : ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, record.operationId,
+                                                ProjectProvisioningState::provisioning});
 }
 
 ProjectProvisioningResult ProjectProvisioningSaga::abandon(const QString &operationId) const {
@@ -368,29 +376,40 @@ ProjectProvisioningResult ProjectProvisioningSaga::abandon(const QString &operat
   const auto database = openDatabase(databasePath_, SQLITE_OPEN_READWRITE);
   if (!database)
     return {ProjectProvisioningCode::storage_unavailable, operationId, ProjectProvisioningState::failed};
+  if (!execute(database->get(), "BEGIN IMMEDIATE;"))
+    return {ProjectProvisioningCode::storage_unavailable, operationId, ProjectProvisioningState::failed};
+  const auto finish = [&database, &operationId](ProjectProvisioningResult result) {
+    if (execute(database->get(), "COMMIT;"))
+      return result;
+    execute(database->get(), "ROLLBACK;");
+    return ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, operationId,
+                                     ProjectProvisioningState::provisioning};
+  };
   bool found = false;
   const auto loaded = readRecord(database->get(), operationId, &found);
   if (!loaded)
-    return {ProjectProvisioningCode::storage_unavailable, operationId, ProjectProvisioningState::failed};
+    return finish({ProjectProvisioningCode::storage_unavailable, operationId, ProjectProvisioningState::failed});
   if (!found)
-    return {ProjectProvisioningCode::not_found, operationId, ProjectProvisioningState::failed};
+    return finish({ProjectProvisioningCode::not_found, operationId, ProjectProvisioningState::failed});
   const Record &record = *loaded;
   if (record.state == ProjectProvisioningState::ready)
-    return failure(ProjectProvisioningCode::manual_intervention_required, record);
+    return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
   if (record.state == ProjectProvisioningState::failed)
-    return failure(record.failureCode == "safe_abandoned" ? ProjectProvisioningCode::none
-                                                          : ProjectProvisioningCode::manual_intervention_required,
-                   record);
+    return finish(failure(record.failureCode == "safe_abandoned"
+                              ? ProjectProvisioningCode::none
+                              : ProjectProvisioningCode::manual_intervention_required,
+                          record));
   const auto proof = resolver_.rootProof(record.rootId);
-  if (!proof || !rootMatches(*proof, record) || !record.assetIdentity || !readAndProveAsset(resolver_, record) ||
-      !resolver_.removeIfIdentity(record.rootId, record.assetName, *record.assetIdentity).isAccepted()) {
+  if (!proof || !rootMatches(*proof, record) || !record.assetIdentity ||
+      !resolver_.removeIfIdentityAndDigest(record.rootId, record.assetName, *record.assetIdentity, record.assetDigest)
+           .isAccepted()) {
     markFailure(database->get(), record, "manual_intervention_required");
-    return failure(ProjectProvisioningCode::manual_intervention_required, record);
+    return finish(failure(ProjectProvisioningCode::manual_intervention_required, record));
   }
-  return markFailure(database->get(), record, "safe_abandoned")
-             ? failure(ProjectProvisioningCode::none, record)
-             : ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, record.operationId,
-                                         ProjectProvisioningState::provisioning};
+  return finish(markFailure(database->get(), record, "safe_abandoned")
+                    ? failure(ProjectProvisioningCode::none, record)
+                    : ProjectProvisioningResult{ProjectProvisioningCode::storage_unavailable, record.operationId,
+                                                ProjectProvisioningState::provisioning});
 }
 
 ProjectProvisioningQueryResult ProjectProvisioningSaga::query(const QString &operationId) const {

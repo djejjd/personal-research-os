@@ -7,6 +7,10 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <array>
+#include <barrier>
+#include <thread>
+
 #include <sqlite3.h>
 
 namespace {
@@ -74,6 +78,7 @@ private slots:
   void marksRevokedRootInterruptedOperationForManualIntervention();
   void marksReplacedRootInterruptedOperationForManualIntervention();
   void reusesCallerOperationIdOnlyForIdenticalIntent();
+  void serializesConcurrentSameOperationIdReplay();
 };
 
 void FileOperationLogTest::replacesOnlyMatchingBaselineAndWritesCompletionMarker() {
@@ -220,6 +225,35 @@ void FileOperationLogTest::reusesCallerOperationIdOnlyForIdenticalIntent() {
   const auto changedPath =
       log.replaceIfUnchanged(resolver, rootId, "other.md", "operation-replay", digest("before"), "after");
   QCOMPARE(changedPath.code, pros::infrastructure::FileOperationCode::operation_id_conflict);
+  QCOMPARE(readFile(directory.path() + "/entry.md"), QByteArray("after"));
+}
+
+void FileOperationLogTest::serializesConcurrentSameOperationIdReplay() {
+  QTemporaryDir directory;
+  QVERIFY(directory.isValid());
+  const QString databasePath = initializedDatabase(directory);
+  QVERIFY(!databasePath.isEmpty());
+  QVERIFY(writeFile(directory.path() + "/entry.md", "before"));
+  ResourceResolver resolver;
+  const QString rootId = registerWritableRoot(resolver, directory.path());
+  QVERIFY(!rootId.isEmpty());
+  std::barrier start(3);
+  std::array<pros::infrastructure::FileOperationCode, 2> results{};
+  std::array<std::thread, 2> workers;
+  for (std::size_t index = 0; index < workers.size(); ++index) {
+    workers[index] = std::thread([&, index] {
+      start.arrive_and_wait();
+      results[index] =
+          pros::infrastructure::FileOperationLog(databasePath)
+              .replaceIfUnchanged(resolver, rootId, "entry.md", "same-operation", digest("before"), "after")
+              .code;
+    });
+  }
+  start.arrive_and_wait();
+  for (std::thread &worker : workers)
+    worker.join();
+  QCOMPARE(results[0], pros::infrastructure::FileOperationCode::none);
+  QCOMPARE(results[1], pros::infrastructure::FileOperationCode::none);
   QCOMPARE(readFile(directory.path() + "/entry.md"), QByteArray("after"));
 }
 

@@ -261,6 +261,17 @@ public:
                                                       ResourceIdentity expectedIdentity) const;
 
   /**
+   * 在受限父目录的协作排他锁内，仅当目标身份和内容摘要都保持匹配时删除文件。
+   *
+   * @param expectedDigest 由调用方持久化的 SHA-256 十六进制摘要；格式无效或任一复验失败均不删除。
+   * @return
+   * 成功表示已在同一锁边界内完成版本验证、删除和目录同步；无法建立该证明时返回拒绝结果，调用方必须保留文件并转人工处理。
+   */
+  [[nodiscard]] ResourceRemoveResult removeIfIdentityAndDigest(const QString &rootId, const QString &relativePath,
+                                                               ResourceIdentity expectedIdentity,
+                                                               const QByteArray &expectedDigest) const;
+
+  /**
    * 枚举授权根内的普通文件相对路径。
    *
    * @return 仅在根授权和目录身份持续有效时返回结果；软链接不会作为结果返回。调用方仍必须通过
