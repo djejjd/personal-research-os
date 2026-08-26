@@ -45,7 +45,9 @@ ProjectProvisioningRequest request(const QString &operationId = "provision-1") {
 
 QString registerWritableRoot(ResourceResolver &resolver, const QString &path) {
   const auto root = resolver.registerRoot(path, ResourceAccess::read_write);
-  return root.isAccepted() ? root.root->id : QString{};
+  if (!root.isAccepted() || !root.root.has_value())
+    return {};
+  return root.root->id;
 }
 
 bool projectIsInvisible(const QString &databasePath, const std::string &projectId) {
