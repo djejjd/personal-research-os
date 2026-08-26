@@ -53,7 +53,7 @@ void AppLogContractTest::emitsStructuredStartupEventsWithoutDataDirectory() {
     previousSequence = sequence;
     ++eventCount;
   }
-  QCOMPARE(eventCount, 5);
+  QCOMPARE(eventCount, 9);
 }
 
 QTEST_APPLESS_MAIN(AppLogContractTest)

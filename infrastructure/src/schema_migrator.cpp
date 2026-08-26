@@ -118,6 +118,89 @@ const std::array<TableDefinition, 16> &s1Tables() {
   return tables;
 }
 
+const TableDefinition &fileOperationLogV4Table() {
+  static const TableDefinition table{
+      "file_operation_log",
+      "CREATE TABLE IF NOT EXISTS file_operation_log (operation_id TEXT PRIMARY KEY, target_path TEXT NOT NULL, "
+      "temporary_path TEXT NOT NULL UNIQUE, expected_digest TEXT NOT NULL CHECK(length(expected_digest) = 64), "
+      "replacement_digest TEXT NOT NULL CHECK(length(replacement_digest) = 64), state TEXT NOT NULL CHECK(state IN "
+      "('prepared', 'temporary_written', 'completed', 'manual_intervention_required')), failure_code TEXT, "
+      "CHECK((state = 'completed' AND (failure_code IS NULL OR failure_code IN ('baseline_conflict', 'write_failed'))) "
+      "OR (state = 'manual_intervention_required' AND "
+      "failure_code = 'manual_intervention_required') OR (state IN ('prepared', 'temporary_written') AND "
+      "failure_code IS NULL)));"};
+  return table;
+}
+
+const TableDefinition &fileOperationLogTable() {
+  static const TableDefinition table{
+      "file_operation_log",
+      "CREATE TABLE IF NOT EXISTS file_operation_log (operation_id TEXT PRIMARY KEY CHECK(length(operation_id) > 0), "
+      "root_id TEXT NOT NULL CHECK(length(root_id) > 0), relative_path TEXT NOT NULL CHECK(length(relative_path) > 0), "
+      "expected_digest TEXT NOT NULL CHECK(length(expected_digest) = 64), replacement_digest TEXT NOT NULL "
+      "CHECK(length(replacement_digest) = 64), state TEXT NOT NULL CHECK(state IN "
+      "('prepared', 'temporary_written', 'completed', 'manual_intervention_required')), failure_code TEXT, "
+      "CHECK((state = 'completed' AND (failure_code IS NULL OR failure_code IN ('baseline_conflict', 'write_failed'))) "
+      "OR (state = 'manual_intervention_required' AND failure_code = 'manual_intervention_required') OR "
+      "(state IN ('prepared', 'temporary_written') AND failure_code IS NULL)));"};
+  return table;
+}
+
+const TableDefinition &projectProvisioningV5Table() {
+  static const TableDefinition table{
+      "project_provisioning_operations",
+      "CREATE TABLE IF NOT EXISTS project_provisioning_operations (operation_id TEXT PRIMARY KEY, project_id TEXT NOT "
+      "NULL UNIQUE REFERENCES projects(id), title TEXT NOT NULL, asset_name TEXT NOT NULL, asset_digest TEXT CHECK("
+      "asset_digest IS NULL OR length(asset_digest) = 64), state TEXT NOT NULL CHECK(state IN ('provisioning', "
+      "'ready', "
+      "'failed')), failure_code TEXT, CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = "
+      "'failed' AND failure_code IN ('asset_collision', 'manual_intervention_required', 'safe_abandoned'))));"};
+  return table;
+}
+
+const TableDefinition &projectProvisioningTable() {
+  static const TableDefinition table{
+      "project_provisioning_operations",
+      "CREATE TABLE IF NOT EXISTS project_provisioning_operations (operation_id TEXT PRIMARY KEY CHECK(length("
+      "operation_id) > 0), project_id TEXT NOT NULL UNIQUE CHECK(length(project_id) > 0), title TEXT NOT NULL, root_id "
+      "TEXT NOT NULL CHECK(length(root_id) > 0), authorization_revision INTEGER NOT NULL CHECK(authorization_revision "
+      ">= 1), root_device INTEGER NOT NULL CHECK(root_device >= 0), root_inode INTEGER NOT NULL CHECK(root_inode >= "
+      "0), "
+      "relative_path TEXT NOT NULL CHECK(length(relative_path) > 0), asset_device INTEGER, asset_inode INTEGER, "
+      "asset_digest TEXT CHECK(asset_digest IS NULL OR length(asset_digest) = 64), state TEXT NOT NULL CHECK(state IN "
+      "('provisioning', 'ready', 'failed')), failure_code TEXT, CHECK((asset_device IS NULL AND asset_inode IS NULL "
+      "AND "
+      "asset_digest IS NULL) OR (asset_device >= 0 AND asset_inode >= 0 AND length(asset_digest) = 64)), "
+      "CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = 'failed' AND failure_code IN "
+      "('asset_collision', 'manual_intervention_required', 'safe_abandoned'))));"};
+  return table;
+}
+
+const std::array<TableDefinition, 4> &reconcileTables() {
+  static const std::array<TableDefinition, 4> tables{{
+      {"document_registry",
+       "CREATE TABLE IF NOT EXISTS document_registry (document_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "relative_path TEXT NOT NULL, device INTEGER NOT NULL CHECK(device >= 0), inode INTEGER NOT NULL CHECK(inode >= "
+       "0), "
+       "content_digest TEXT NOT NULL CHECK(length(content_digest) = 64), content_revision INTEGER NOT NULL "
+       "CHECK(content_revision >= 1), state TEXT NOT NULL CHECK(state IN ('active', 'tombstoned', 'conflict')), "
+       "UNIQUE(root_id, relative_path), UNIQUE(root_id, device, inode));"},
+      {"watcher_event_queue",
+       "CREATE TABLE IF NOT EXISTS watcher_event_queue (event_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "relative_path TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('queued', 'reconciled')));"},
+      {"reconcile_operations",
+       "CREATE TABLE IF NOT EXISTS reconcile_operations (operation_id TEXT PRIMARY KEY, root_id TEXT NOT NULL, "
+       "result_code TEXT NOT NULL CHECK(result_code IN ('none', 'resource_unavailable', 'identity_conflict')), "
+       "health TEXT NOT NULL CHECK(health IN ('ready', 'unavailable', 'conflict')), resource_rejection TEXT NOT NULL, "
+       "updated_count INTEGER NOT NULL CHECK(updated_count >= 0), tombstoned_count INTEGER NOT NULL "
+       "CHECK(tombstoned_count >= 0), conflict_count INTEGER NOT NULL CHECK(conflict_count >= 0));"},
+      {"reconcile_health",
+       "CREATE TABLE IF NOT EXISTS reconcile_health (root_id TEXT PRIMARY KEY, health TEXT NOT NULL "
+       "CHECK(health IN ('ready', 'stale', 'unavailable', 'conflict')), resource_rejection TEXT NOT NULL);"},
+  }};
+  return tables;
+}
+
 std::optional<std::vector<std::string>> queryRows(sqlite3 *database, const std::string &sql, int columnCount) {
   sqlite3_stmt *rawStatement = nullptr;
   if (sqlite3_prepare_v2(database, sql.c_str(), -1, &rawStatement, nullptr) != SQLITE_OK)
@@ -308,9 +391,91 @@ bool ensureS1Schema(sqlite3 *database, QString *errorMessage) {
   return true;
 }
 
+bool ensureS2Schema(sqlite3 *database, QString *errorMessage) {
+  return ensureS1Schema(database, errorMessage) &&
+         execute(database, fileOperationLogV4Table().createSql, errorMessage) &&
+         tableMatchesDefinition(database, fileOperationLogV4Table(), errorMessage);
+}
+
+bool ensureS3Schema(sqlite3 *database, QString *errorMessage) {
+  if (!ensureS2Schema(database, errorMessage) ||
+      !execute(database, projectProvisioningV5Table().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningV5Table(), errorMessage)) {
+    return false;
+  }
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return true;
+}
+
+bool ensureCurrentSchema(sqlite3 *database, QString *errorMessage) {
+  if (!ensureS1Schema(database, errorMessage) || !execute(database, fileOperationLogTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) ||
+      !execute(database, projectProvisioningTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningTable(), errorMessage)) {
+    return false;
+  }
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return true;
+}
+
 bool migrateV1ToV2(sqlite3 *database, QString *errorMessage) {
   return ensureS1Schema(database, errorMessage) &&
          execute(database, "UPDATE schema_metadata SET schema_version = 2 WHERE schema_version = 1;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+bool migrateV2ToV3(sqlite3 *database, QString *errorMessage) {
+  return ensureS2Schema(database, errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 3 WHERE schema_version = 2;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+bool migrateV3ToV4(sqlite3 *database, QString *errorMessage) {
+  return ensureS3Schema(database, errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 4 WHERE schema_version = 3;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+bool migrateV4ToV5(sqlite3 *database, QString *errorMessage) {
+  return ensureS3Schema(database, errorMessage) &&
+         execute(database, "ALTER TABLE file_operation_log RENAME TO legacy_file_operation_log_v4;", errorMessage) &&
+         execute(database, fileOperationLogTable().createSql, errorMessage) &&
+         tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 5 WHERE schema_version = 4;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+/**
+ * 将 v5 的无根绑定 saga 表升级为 v6。
+ *
+ * v5 记录没有可验证的 root/authorization/identity 证据，含记录时拒绝提升版本而非猜测目录或删除项目；空表可原子重建。
+ */
+bool migrateV5ToV6(sqlite3 *database, QString *errorMessage) {
+  const auto count = queryRows(database, "SELECT COUNT(*) FROM project_provisioning_operations;", 1);
+  if (!count || *count != std::vector<std::string>{"0"}) {
+    if (errorMessage != nullptr)
+      *errorMessage = "旧版项目创建记录缺少资源证明，需要人工迁移";
+    return false;
+  }
+  if (!ensureS1Schema(database, errorMessage) || !execute(database, fileOperationLogTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) ||
+      !execute(database, projectProvisioningV5Table().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningV5Table(), errorMessage))
+    return false;
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return execute(database, "DROP TABLE project_provisioning_operations;", errorMessage) &&
+         execute(database, projectProvisioningTable().createSql, errorMessage) &&
+         tableMatchesDefinition(database, projectProvisioningTable(), errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 6 WHERE schema_version = 5;", errorMessage) &&
          sqlite3_changes(database) == 1;
 }
 
@@ -382,10 +547,18 @@ bool SchemaMigrator::migrate(const QString &databasePath, QString *errorMessage)
       if (!versionValid || !version.has_value()) {
         migrated = false;
       } else if (*version == domain::kCurrentSchemaVersion) {
-        migrated = ensureS1Schema(database, errorMessage);
+        migrated = ensureCurrentSchema(database, errorMessage);
         break;
       } else if (*version == 1) {
         migrated = migrateV1ToV2(database, errorMessage);
+      } else if (*version == 2) {
+        migrated = migrateV2ToV3(database, errorMessage);
+      } else if (*version == 3) {
+        migrated = migrateV3ToV4(database, errorMessage);
+      } else if (*version == 4) {
+        migrated = migrateV4ToV5(database, errorMessage);
+      } else if (*version == 5) {
+        migrated = migrateV5ToV6(database, errorMessage);
       } else {
         if (errorMessage != nullptr)
           *errorMessage = "不支持的 schema 版本";

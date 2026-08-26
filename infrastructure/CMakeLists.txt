@@ -1,7 +1,12 @@
 add_library(pros_infrastructure STATIC
   src/command_composition.cpp
+  src/document_reconciler.cpp
+  src/file_operation_log.cpp
   src/governance_composition.cpp
   src/local_data_directory.cpp
+  src/markdown_fidelity.cpp
+  src/project_provisioning.cpp
+  src/resource_resolver.cpp
   src/schema_migrator.cpp
   src/sqlite_approval_command_handler.cpp
   src/sqlite_command_transaction.cpp
