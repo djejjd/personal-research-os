@@ -1,0 +1,52 @@
+# Private design records are kept locally until prepared for public release.
+/docs/
+
+# macOS and editors
+.DS_Store
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# CMake, Qt, and compiler output
+/build/
+/build-*/
+/cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+CMakeUserPresets.json
+*.pro.user
+*.xcodeproj/
+*.xcworkspace/
+*.dSYM/
+
+# Runtime data and diagnostics
+/data/
+/runtime/
+/logs/
+/tmp/
+*.log
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite
+*.db
+
+# Test and coverage output
+/coverage/
+/test-results/
+*.profraw
+*.profdata
+*.gcda
+*.gcno
