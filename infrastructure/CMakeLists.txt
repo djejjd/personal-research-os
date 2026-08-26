@@ -1,5 +1,6 @@
 add_library(pros_infrastructure STATIC
   src/command_composition.cpp
+  src/file_operation_log.cpp
   src/governance_composition.cpp
   src/local_data_directory.cpp
   src/markdown_fidelity.cpp

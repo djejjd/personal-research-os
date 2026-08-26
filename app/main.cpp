@@ -1,5 +1,6 @@
 #include "pros/application/app_config.h"
 #include "pros/domain/schema_version.h"
+#include "pros/infrastructure/file_operation_log.h"
 #include "pros/infrastructure/local_data_directory.h"
 #include "pros/infrastructure/schema_migrator.h"
 
@@ -28,6 +29,7 @@ constexpr LogEventDefinition kApplicationStartup{"app.startup", "应用启动状
 constexpr LogEventDefinition kDataDirectory{"storage.data_directory", "本地数据目录初始化", "local_data_directory"};
 constexpr LogEventDefinition kSchemaMigration{"storage.schema_migration", "本地 schema 迁移", "schema_migrator"};
 constexpr LogEventDefinition kSchemaVersion{"storage.schema_version", "本地 schema 版本读取", "schema_migrator"};
+constexpr LogEventDefinition kFileRecovery{"storage.file_recovery", "本地文件恢复扫描", "file_operation_log"};
 
 void logEvent(const LogEventDefinition &definition, const char *result, const char *level = "INFO",
               const char *reasonCode = nullptr) {
@@ -77,6 +79,15 @@ int main(int argc, char *argv[]) {
       return 1;
     }
     logEvent(kSchemaMigration, "succeeded");
+
+    pros::infrastructure::FileOperationLog fileOperationLog(databasePath);
+    logEvent(kFileRecovery, "started");
+    const pros::infrastructure::FileRecoveryReport recovery = fileOperationLog.recoverPending();
+    if (!recovery.isSucceeded()) {
+      logEvent(kFileRecovery, "failed", "ERROR", pros::infrastructure::fileOperationCodeName(recovery.code));
+      return 1;
+    }
+    logEvent(kFileRecovery, "succeeded");
 
     const int schemaVersion = migrator.schemaVersion(databasePath, &errorMessage);
     if (schemaVersion < 0) {

@@ -73,6 +73,7 @@ private slots:
   void rejectsUnsupportedOrAmbiguousMetadata();
   void rejectsDamagedV1SchemaWithoutPromotingVersion();
   void rejectsDamagedCurrentSchema();
+  void rejectsDamagedFileOperationLogInCurrentSchema();
   void rejectsChangedCheckLiteralCaseFromV1();
   void rejectsChangedCheckLiteralCaseInCurrentSchema();
   void rejectsMissingAllocatorWhenEventsExistFromV1();
@@ -91,10 +92,10 @@ void SchemaMigratorTest::createsCompleteSchemaFromEmptyDatabase() {
   QString error;
   QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
   QCOMPARE(migrator.schemaVersion(path, &error), pros::domain::kCurrentSchemaVersion);
-  for (const char *table :
-       {"operation_records", "delivery_sequence", "domain_events", "outbox_records", "activity_facts", "projects",
-        "tasks", "milestones", "directions", "governance_targets", "governance_note_links", "governance_evidence",
-        "governance_acceptance", "governance_acceptance_evidence", "operation_plans", "approvals"})
+  for (const char *table : {"operation_records", "delivery_sequence", "domain_events", "outbox_records",
+                            "activity_facts", "projects", "tasks", "milestones", "directions", "governance_targets",
+                            "governance_note_links", "governance_evidence", "governance_acceptance",
+                            "governance_acceptance_evidence", "operation_plans", "approvals", "file_operation_log"})
     QVERIFY(tableExists(path, table));
 }
 
@@ -105,7 +106,7 @@ void SchemaMigratorTest::canRunCurrentMigrationMoreThanOnce() {
   QString error;
   QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
   QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
 }
 
 void SchemaMigratorTest::upgradesV1DatabaseToCurrentSchema() {
@@ -115,7 +116,7 @@ void SchemaMigratorTest::upgradesV1DatabaseToCurrentSchema() {
   pros::infrastructure::SchemaMigrator migrator;
   QString error;
   QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
   QVERIFY(tableExists(path, "operation_records"));
   QVERIFY(tableExists(path, "approvals"));
 }
@@ -137,7 +138,7 @@ void SchemaMigratorTest::rejectsUnsupportedOrAmbiguousMetadata() {
   pros::infrastructure::SchemaMigrator migrator;
   QString error;
   const QString future = directory.path() + "/future.sqlite";
-  createMetadata(future, "(3)");
+  createMetadata(future, "(4)");
   QVERIFY(!migrator.migrate(future, &error));
   const QString duplicate = directory.path() + "/duplicate.sqlite";
   createMetadata(duplicate, "(1), (1)");
@@ -179,8 +180,20 @@ void SchemaMigratorTest::rejectsDamagedCurrentSchema() {
                        nullptr, nullptr, nullptr) == SQLITE_OK);
   sqlite3_close(database);
   QVERIFY(!migrator.migrate(path, &error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
   QVERIFY(tableExists(path, "domain_events"));
+}
+
+void SchemaMigratorTest::rejectsDamagedFileOperationLogInCurrentSchema() {
+  QTemporaryDir directory;
+  const QString path = directory.path() + "/damaged-file-operation-log.sqlite";
+  pros::infrastructure::SchemaMigrator migrator;
+  QString error;
+  QVERIFY2(migrator.migrate(path, &error), qPrintable(error));
+  QVERIFY(executeSql(
+      path, "DROP TABLE file_operation_log; CREATE TABLE file_operation_log (operation_id TEXT PRIMARY KEY);"));
+  QVERIFY(!migrator.migrate(path, &error));
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
 }
 
 void SchemaMigratorTest::rejectsChangedCheckLiteralCaseFromV1() {
@@ -210,7 +223,7 @@ void SchemaMigratorTest::rejectsChangedCheckLiteralCaseInCurrentSchema() {
   changedSql.replace("'global'", "'GLOBAL'");
   QVERIFY(executeSql(path, "PRAGMA foreign_keys=OFF; DROP TABLE domain_events; " + changedSql + ";"));
   QVERIFY(!migrator.migrate(path, &error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
 }
 
 void SchemaMigratorTest::rejectsMissingAllocatorWhenEventsExistFromV1() {
@@ -239,7 +252,7 @@ void SchemaMigratorTest::rejectsMissingAllocatorWhenEventsExistInCurrentSchema()
                            "('event-1','global',1,'test','aggregate','id',1,0,1,'caller','operation','{}'); "
                            "DELETE FROM delivery_sequence;"));
   QVERIFY(!migrator.migrate(path, &error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
   QCOMPARE(tableSql(path, "delivery_sequence").isEmpty(), false);
 }
 
@@ -252,7 +265,7 @@ void SchemaMigratorTest::rejectsAllocatorBehindEventsInCurrentSchema() {
   QVERIFY(executeSql(path, "INSERT INTO domain_events VALUES "
                            "('event-1','global',1,'test','aggregate','id',1,0,1,'caller','operation','{}');"));
   QVERIFY(!migrator.migrate(path, &error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
 }
 
 void SchemaMigratorTest::rejectsGappedDeliveryPositionsFromV1() {
@@ -291,7 +304,7 @@ void SchemaMigratorTest::rejectsGappedDeliveryPositionsInCurrentSchema() {
                            "('event-1','global',1,'pending',NULL,NULL,NULL),"
                            "('event-3','global',3,'pending',NULL,NULL,NULL);"));
   QVERIFY(!migrator.migrate(path, &error));
-  QCOMPARE(migrator.schemaVersion(path, &error), 2);
+  QCOMPARE(migrator.schemaVersion(path, &error), 3);
 }
 
 void SchemaMigratorTest::bindsApprovalToExactPlanRevisionAndDigest() {
