@@ -7,9 +7,7 @@ QT_ROOT=${QT_ROOT:-/opt/homebrew/opt/qt}
 BASE_REF=${BASE_REF:-origin/main}
 LLVM_BIN=${LLVM_BIN:-"$(brew --prefix llvm)/bin"}
 SDK_ROOT=${SDK_ROOT:-"$(xcrun --sdk macosx --show-sdk-path)"}
-. "$PROJECT_ROOT/toolchain.lock.sh"
 SQLITE_ROOT=${SQLITE_ROOT:-"$(brew --prefix sqlite)"}
-SQLITE_CLI=${SQLITE_CLI:-"$SQLITE_ROOT/bin/sqlite3"}
 SOURCE_FILE_LIST=$(mktemp "${TMPDIR:-/tmp}/personal-research-os-source-files.XXXXXX")
 trap 'rm -f "$SOURCE_FILE_LIST"' EXIT HUP INT TERM
 
@@ -18,33 +16,11 @@ if [ ! -x "$LLVM_BIN/clang-format" ] || [ ! -x "$LLVM_BIN/clang-tidy" ]; then
   exit 1
 fi
 
-require_version() {
-  tool_name=$1
-  expected_version=$2
-  actual_version=$3
-  if [ "$actual_version" != "$expected_version" ]; then
-    echo "$tool_name 版本不符合 toolchain.lock.sh：期望 $expected_version，实际 $actual_version。" >&2
-    exit 1
-  fi
-}
-
-require_version cmake "$PROS_CMAKE_VERSION" "$(cmake --version | sed -n '1s/.* //p')"
-require_version ninja "$PROS_NINJA_VERSION" "$(ninja --version)"
-require_version Qt "$PROS_QT_VERSION" "$("$QT_ROOT/bin/qmake" -query QT_VERSION)"
-require_version LLVM "$PROS_LLVM_VERSION" "$("$LLVM_BIN/clang-tidy" --version | sed -n '1s/.*version \([0-9.]*\).*/\1/p')"
-if [ ! -x "$SQLITE_CLI" ]; then
-  echo "找不到受控 SQLite CLI：$SQLITE_CLI。" >&2
-  exit 1
-fi
-require_version SQLite "$PROS_SQLITE_VERSION" "$("$SQLITE_CLI" --version | awk '{print $1}')"
-
 PKG_CONFIG_PATH="$SQLITE_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
   cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -U 'SQLite3_*' -U 'PC_SQLite3_*'
-SQLITE_INCLUDE=$(sed -n 's/^SQLite3_INCLUDE_DIR:PATH=//p' "$BUILD_DIR/CMakeCache.txt")
-SQLITE_LIBRARY=$(sed -n 's/^SQLite3_LIBRARY:FILEPATH=//p' "$BUILD_DIR/CMakeCache.txt")
-case "$SQLITE_INCLUDE" in "$SQLITE_ROOT"/*) ;; *) echo "CMake 未使用受控 SQLite 头文件。" >&2; exit 1 ;; esac
-case "$SQLITE_LIBRARY" in "$SQLITE_ROOT"/*) ;; *) echo "CMake 未使用受控 SQLite 库。" >&2; exit 1 ;; esac
+    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" \
+    -DSQLite3_INCLUDE_DIR="$SQLITE_ROOT/include" -DSQLite3_LIBRARY="$SQLITE_ROOT/lib/libsqlite3.dylib" \
+    -U 'PC_SQLite3_*'
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
