@@ -18,7 +18,9 @@ fi
 
 PKG_CONFIG_PATH="$SQLITE_ROOT/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}" \
   cmake -S "$PROJECT_ROOT" -B "$BUILD_DIR" -G Ninja -DCMAKE_BUILD_TYPE=Debug -DCMAKE_PREFIX_PATH="$QT_ROOT" \
-    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" -U 'SQLite3_*' -U 'PC_SQLite3_*'
+    -DCMAKE_CXX_COMPILER="$LLVM_BIN/clang++" -DCMAKE_OSX_SYSROOT="$SDK_ROOT" \
+    -DSQLite3_INCLUDE_DIR="$SQLITE_ROOT/include" -DSQLite3_LIBRARY="$SQLITE_ROOT/lib/libsqlite3.dylib" \
+    -U 'PC_SQLite3_*'
 cmake --build "$BUILD_DIR"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 

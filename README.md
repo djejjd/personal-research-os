@@ -10,7 +10,7 @@ The first planned engineering milestone establishes the Qt and CMake baseline. P
 
 ## Development Dependencies
 
-On macOS, install the development dependencies with `brew bundle install --file Brewfile`. The project enforces the minimum Qt 6.8 and SQLite 3.35 compatibility baseline through CMake; `scripts/check.sh` prefers the installed Homebrew SQLite through `pkg-config` so the macOS SDK version does not cap development. Exact dependency artifacts are reserved in `toolchain.lock.sh` and checked by `scripts/release/check-toolchain-lock.sh` during S5 release preparation, not during feature development.
+On macOS, install the development dependencies with `brew bundle install --file Brewfile`. The project enforces the minimum Qt 6.8 and SQLite 3.35 compatibility baseline through CMake; `scripts/check.sh` selects the installed Homebrew SQLite headers and library when available so the macOS SDK version does not cap development. Exact dependency artifacts are reserved in `toolchain.lock.sh` and checked by `scripts/release/check-toolchain-lock.sh` during S5 release preparation, not during feature development.
 
 ## License
 
