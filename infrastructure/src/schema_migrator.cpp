@@ -34,6 +34,13 @@ struct TableDefinition final {
   const char *createSql;
 };
 
+struct TriggerDefinition final {
+  const char *name;
+  const char *createSql;
+};
+
+bool triggerMatchesDefinition(sqlite3 *database, const TriggerDefinition &trigger, QString *errorMessage);
+
 const std::array<TableDefinition, 16> &s1Tables() {
   static const std::array<TableDefinition, 16> tables{{
       {"operation_records",
@@ -201,6 +208,75 @@ const std::array<TableDefinition, 4> &reconcileTables() {
   return tables;
 }
 
+const std::array<TableDefinition, 5> &knowledgeIndexTables() {
+  static const std::array<TableDefinition, 5> tables{{
+      {"knowledge_source_events",
+       "CREATE TABLE IF NOT EXISTS knowledge_source_events (position INTEGER PRIMARY KEY, "
+       "document_id TEXT NOT NULL, content_revision INTEGER NOT NULL CHECK(content_revision >= 1), "
+       "UNIQUE(document_id, content_revision));"},
+      {"knowledge_projection_state",
+       "CREATE TABLE IF NOT EXISTS knowledge_projection_state (singleton_id INTEGER PRIMARY KEY "
+       "CHECK(singleton_id = 1), generation INTEGER NOT NULL CHECK(generation >= 0), health TEXT NOT NULL "
+       "CHECK(health IN ('ready', 'rebuilding', 'stale', 'unavailable')), checkpoint_position INTEGER NOT NULL "
+       "CHECK(checkpoint_position >= 0), target_position INTEGER NOT NULL CHECK(target_position >= 0), reason "
+       "TEXT NOT NULL, CHECK(checkpoint_position <= target_position));"},
+      {"knowledge_projection_documents",
+       "CREATE TABLE IF NOT EXISTS knowledge_projection_documents (generation INTEGER NOT NULL CHECK(generation >= 1), "
+       "document_id TEXT NOT NULL, root_id TEXT NOT NULL, relative_path TEXT NOT NULL, content_revision INTEGER NOT "
+       "NULL CHECK(content_revision >= 1), parse_status TEXT NOT NULL CHECK(parse_status IN ('parsed', "
+       "'degraded_invalid_utf8')), body TEXT NOT NULL, PRIMARY KEY(generation, document_id));"},
+      {"knowledge_projection_tags",
+       "CREATE TABLE IF NOT EXISTS knowledge_projection_tags (generation INTEGER NOT NULL CHECK(generation >= 1), "
+       "document_id TEXT NOT NULL, tag TEXT NOT NULL, PRIMARY KEY(generation, document_id, tag), FOREIGN KEY "
+       "(generation, document_id) REFERENCES knowledge_projection_documents(generation, document_id));"},
+      {"knowledge_projection_links",
+       "CREATE TABLE IF NOT EXISTS knowledge_projection_links (generation INTEGER NOT NULL CHECK(generation >= 1), "
+       "document_id TEXT NOT NULL, target TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('relative_markdown', "
+       "'wiki')), PRIMARY KEY(generation, document_id, target, kind), FOREIGN KEY (generation, document_id) "
+       "REFERENCES knowledge_projection_documents(generation, document_id));"},
+  }};
+  return tables;
+}
+
+const std::array<TriggerDefinition, 2> &knowledgeSourceTriggers() {
+  static const std::array<TriggerDefinition, 2> triggers{{
+      {"knowledge_source_event_after_insert",
+       "CREATE TRIGGER IF NOT EXISTS knowledge_source_event_after_insert AFTER INSERT ON document_registry BEGIN "
+       "INSERT INTO knowledge_source_events(document_id, content_revision) SELECT NEW.document_id, "
+       "NEW.content_revision WHERE NOT EXISTS (SELECT 1 FROM knowledge_source_events WHERE document_id = "
+       "NEW.document_id AND content_revision = NEW.content_revision); END;"},
+      {"knowledge_source_event_after_update",
+       "CREATE TRIGGER IF NOT EXISTS knowledge_source_event_after_update AFTER UPDATE OF root_id, relative_path, "
+       "content_digest, content_revision, state ON document_registry WHEN NEW.content_revision <> OLD.content_revision "
+       "OR NEW.root_id <> OLD.root_id OR NEW.relative_path <> OLD.relative_path OR NEW.content_digest <> "
+       "OLD.content_digest OR NEW.state <> OLD.state BEGIN INSERT INTO knowledge_source_events(document_id, "
+       "content_revision) SELECT NEW.document_id, NEW.content_revision WHERE NOT EXISTS (SELECT 1 FROM "
+       "knowledge_source_events WHERE document_id = NEW.document_id AND content_revision = NEW.content_revision); "
+       "END;"},
+  }};
+  return triggers;
+}
+
+bool ensureKnowledgeSourceTriggers(sqlite3 *database, QString *errorMessage) {
+  for (const TriggerDefinition &trigger : knowledgeSourceTriggers()) {
+    if (!execute(database, trigger.createSql, errorMessage) ||
+        !triggerMatchesDefinition(database, trigger, errorMessage))
+      return false;
+  }
+  return execute(
+             database,
+             "INSERT INTO knowledge_source_events(document_id, content_revision) SELECT d.document_id, "
+             "d.content_revision FROM document_registry d WHERE NOT EXISTS (SELECT 1 FROM knowledge_source_events s "
+             "WHERE s.document_id = d.document_id AND s.content_revision = d.content_revision) ORDER BY d.document_id;",
+             errorMessage) &&
+         execute(database,
+                 "INSERT OR IGNORE INTO knowledge_projection_state "
+                 "(singleton_id, generation, health, checkpoint_position, target_position, reason) "
+                 "VALUES (1, 0, 'stale', 0, (SELECT COALESCE(MAX(position), 0) FROM knowledge_source_events), "
+                 "'not_built');",
+                 errorMessage);
+}
+
 std::optional<std::vector<std::string>> queryRows(sqlite3 *database, const std::string &sql, int columnCount) {
   sqlite3_stmt *rawStatement = nullptr;
   if (sqlite3_prepare_v2(database, sql.c_str(), -1, &rawStatement, nullptr) != SQLITE_OK)
@@ -293,6 +369,19 @@ std::string normalizedSql(const std::string &sql) {
   if (const std::size_t position = result.find(optionalClause); position != std::string::npos)
     result.erase(position, optionalClause.size());
   return result;
+}
+
+bool triggerMatchesDefinition(sqlite3 *database, const TriggerDefinition &trigger, QString *errorMessage) {
+  const std::string sql =
+      std::string("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = '") + trigger.name + "';";
+  const auto actual = queryRows(database, sql, 1);
+  std::string expectedSql = normalizedSql(trigger.createSql);
+  if (!expectedSql.empty() && expectedSql.back() == ';')
+    expectedSql.pop_back();
+  const bool valid = actual && actual->size() == 1 && normalizedSql(actual->front()) == expectedSql;
+  if (!valid && errorMessage != nullptr)
+    *errorMessage = "schema 触发器定义损坏";
+  return valid;
 }
 
 bool tableMatchesDefinition(sqlite3 *database, const TableDefinition &table, QString *errorMessage) {
@@ -421,7 +510,11 @@ bool ensureCurrentSchema(sqlite3 *database, QString *errorMessage) {
     if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
       return false;
   }
-  return true;
+  for (const TableDefinition &table : knowledgeIndexTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return ensureKnowledgeSourceTriggers(database, errorMessage);
 }
 
 bool migrateV1ToV2(sqlite3 *database, QString *errorMessage) {
@@ -476,6 +569,26 @@ bool migrateV5ToV6(sqlite3 *database, QString *errorMessage) {
          execute(database, projectProvisioningTable().createSql, errorMessage) &&
          tableMatchesDefinition(database, projectProvisioningTable(), errorMessage) &&
          execute(database, "UPDATE schema_metadata SET schema_version = 6 WHERE schema_version = 5;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+/** 将 S2 的协调登记事实接入 S3 可重建知识投影，并建立连续 source watermark。 */
+bool migrateV6ToV7(sqlite3 *database, QString *errorMessage) {
+  if (!ensureS1Schema(database, errorMessage) || !execute(database, fileOperationLogTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, fileOperationLogTable(), errorMessage) ||
+      !execute(database, projectProvisioningTable().createSql, errorMessage) ||
+      !tableMatchesDefinition(database, projectProvisioningTable(), errorMessage))
+    return false;
+  for (const TableDefinition &table : reconcileTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  for (const TableDefinition &table : knowledgeIndexTables()) {
+    if (!execute(database, table.createSql, errorMessage) || !tableMatchesDefinition(database, table, errorMessage))
+      return false;
+  }
+  return ensureKnowledgeSourceTriggers(database, errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 7 WHERE schema_version = 6;", errorMessage) &&
          sqlite3_changes(database) == 1;
 }
 
@@ -559,6 +672,8 @@ bool SchemaMigrator::migrate(const QString &databasePath, QString *errorMessage)
         migrated = migrateV4ToV5(database, errorMessage);
       } else if (*version == 5) {
         migrated = migrateV5ToV6(database, errorMessage);
+      } else if (*version == 6) {
+        migrated = migrateV6ToV7(database, errorMessage);
       } else {
         if (errorMessage != nullptr)
           *errorMessage = "不支持的 schema 版本";
