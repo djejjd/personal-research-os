@@ -2,6 +2,7 @@
 #include "pros/domain/schema_version.h"
 #include "pros/infrastructure/file_operation_log.h"
 #include "pros/infrastructure/local_data_directory.h"
+#include "pros/infrastructure/resource_resolver.h"
 #include "pros/infrastructure/schema_migrator.h"
 
 #include <QApplication>
@@ -80,9 +81,10 @@ int main(int argc, char *argv[]) {
     }
     logEvent(kSchemaMigration, "succeeded");
 
+    pros::infrastructure::ResourceResolver resourceResolver;
     pros::infrastructure::FileOperationLog fileOperationLog(databasePath);
     logEvent(kFileRecovery, "started");
-    const pros::infrastructure::FileRecoveryReport recovery = fileOperationLog.recoverPending();
+    const pros::infrastructure::FileRecoveryReport recovery = fileOperationLog.recoverPending(resourceResolver);
     if (!recovery.isSucceeded()) {
       logEvent(kFileRecovery, "failed", "ERROR", pros::infrastructure::fileOperationCodeName(recovery.code));
       return 1;

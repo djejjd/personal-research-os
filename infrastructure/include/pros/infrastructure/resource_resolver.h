@@ -81,6 +81,53 @@ private:
   ResourceIdentity identity_;
 };
 
+/**
+ * 授权普通文件的受限原子替换句柄。
+ *
+ * 句柄始终持有由资源根目录句柄相对解析得到的父目录、协作锁和目标名称，绝不公开物理路径或文件描述符。
+ * 每个读写、临时文件、重命名与目录同步操作均复验撤权和根 identity；撤权或根替换后不得继续访问旧目录。
+ */
+class ResourceReplacementHandle final {
+public:
+  ResourceReplacementHandle(const ResourceReplacementHandle &) = delete;
+  ResourceReplacementHandle &operator=(const ResourceReplacementHandle &) = delete;
+  ResourceReplacementHandle(ResourceReplacementHandle &&) = delete;
+  ResourceReplacementHandle &operator=(ResourceReplacementHandle &&) = delete;
+  ~ResourceReplacementHandle();
+
+  /** 从当前目标普通文件读取全部字节；失败不产生写入副作用。 */
+  [[nodiscard]] bool readTargetAll(QByteArray *contents, ResourceRejectCode *rejection = nullptr) const;
+
+  /**
+   * 以 `O_CREAT|O_EXCL|O_NOFOLLOW` 创建操作专属临时文件、写入全部内容并同步文件数据。
+   *
+   * @return 成功时临时文件已持久化在目标同一受限父目录；同一操作重复创建或任一授权复验失败时返回 false。
+   */
+  [[nodiscard]] bool writeTemporaryAndSync(const QByteArray &contents, ResourceRejectCode *rejection = nullptr) const;
+
+  /** 从当前操作专属临时普通文件读取全部字节；失败不修改文件。 */
+  [[nodiscard]] bool readTemporaryAll(QByteArray *contents, ResourceRejectCode *rejection = nullptr) const;
+
+  /**
+   * 将已同步的操作专属临时文件以 `renameat` 原子替换目标，并同步受限父目录。
+   *
+   * @return 仅当替换与目录同步均完成且根持续授权时返回 true；失败时调用方必须按未知结果处理。
+   */
+  [[nodiscard]] bool replaceTemporaryAndSync(ResourceRejectCode *rejection = nullptr) const;
+
+private:
+  friend class ResourceResolver;
+
+  ResourceReplacementHandle(std::shared_ptr<ResourceRootState> root, int parentDescriptor, int lockDescriptor,
+                            QString targetName, QString temporaryName);
+
+  std::shared_ptr<ResourceRootState> root_;
+  int parentDescriptor_;
+  int lockDescriptor_;
+  QString targetName_;
+  QString temporaryName_;
+};
+
 /** 根注册成功后返回的稳定标识与授权 revision。 */
 struct ResourceRoot {
   QString id;
@@ -100,6 +147,14 @@ struct ResourceRootResult {
 struct ResourceOpenResult {
   ResourceRejectCode rejection = ResourceRejectCode::none;
   std::unique_ptr<ResourceHandle> handle;
+
+  [[nodiscard]] bool isAccepted() const;
+};
+
+/** 原子替换句柄的结构化打开结果；失败时不返回任何目录或文件能力。 */
+struct ResourceReplacementResult {
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  std::unique_ptr<ResourceReplacementHandle> handle;
 
   [[nodiscard]] bool isAccepted() const;
 };
@@ -149,6 +204,15 @@ public:
    */
   [[nodiscard]] ResourceOpenResult resolveAndOpen(const QString &rootId, const QString &relativePath,
                                                   ResourceOpenMode mode) const;
+
+  /**
+   * 打开授权根内既有普通文件的原子替换能力。
+   *
+   * `relativePath` 只能是根内相对路径；`operationId` 仅用于在受限父目录中导出稳定临时名，不作为路径片段。
+   * 返回的句柄通过目录句柄相对 API 创建锁与临时文件、执行替换并同步目录。调用方不得从本接口获得绝对路径。
+   */
+  [[nodiscard]] ResourceReplacementResult openForAtomicReplacement(const QString &rootId, const QString &relativePath,
+                                                                   const QString &operationId) const;
 
   /**
    * 枚举授权根内的普通文件相对路径。

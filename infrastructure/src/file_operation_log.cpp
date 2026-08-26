@@ -1,19 +1,9 @@
 #include "pros/infrastructure/file_operation_log.h"
 
 #include <QCryptographicHash>
-#include <QDir>
-#include <QFile>
-#include <QFileInfo>
-#include <QUuid>
 
 #include <sqlite3.h>
 
-#include <fcntl.h>
-#include <sys/file.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <array>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -27,43 +17,14 @@ struct DatabaseCloser final {
 };
 using Database = std::unique_ptr<sqlite3, DatabaseCloser>;
 
-struct FileDescriptor final {
-  explicit FileDescriptor(int value = -1) : value(value) {}
-  FileDescriptor(const FileDescriptor &) = delete;
-  FileDescriptor &operator=(const FileDescriptor &) = delete;
-  FileDescriptor(FileDescriptor &&other) noexcept : value(std::exchange(other.value, -1)) {}
-  FileDescriptor &operator=(FileDescriptor &&other) noexcept {
-    if (this != &other) {
-      reset();
-      value = std::exchange(other.value, -1);
-    }
-    return *this;
-  }
-  ~FileDescriptor() { reset(); }
-
-  void reset() {
-    if (value >= 0) {
-      close(value);
-      value = -1;
-    }
-  }
-
-  int value;
-};
-
 struct PendingOperation final {
   QString operationId;
-  QString targetPath;
-  QString temporaryPath;
+  QString rootId;
+  QString relativePath;
   QByteArray expectedDigest;
   QByteArray replacementDigest;
   QString state;
-};
-
-struct TargetPaths final {
-  QString target;
-  QString temporary;
-  QString lock;
+  QString failureCode;
 };
 
 bool isDigest(const QByteArray &value) {
@@ -77,87 +38,6 @@ bool isDigest(const QByteArray &value) {
 }
 
 bool isValidText(const QString &value) { return !value.isEmpty() && !value.contains(QChar::Null); }
-
-std::optional<TargetPaths> targetPaths(const QString &targetPath, const QString &operationId) {
-  if (!isValidText(targetPath) || !QDir::isAbsolutePath(targetPath) || !isValidText(operationId))
-    return std::nullopt;
-  const QFileInfo targetInformation(targetPath);
-  if (!targetInformation.exists() || !targetInformation.isFile() || targetInformation.isSymLink())
-    return std::nullopt;
-  const QString target = targetInformation.canonicalFilePath();
-  const QFileInfo canonicalInformation(target);
-  const QString directory = canonicalInformation.dir().canonicalPath();
-  if (!isValidText(target) || !isValidText(directory) || canonicalInformation.fileName().isEmpty())
-    return std::nullopt;
-  const QString temporary =
-      QDir(directory).filePath("." + canonicalInformation.fileName() + ".pros-" + operationId + ".tmp");
-  return TargetPaths{target, temporary, target + ".pros.lock"};
-}
-
-bool readDigest(const QString &path, QByteArray *digest) {
-  if (digest == nullptr)
-    return false;
-  const QByteArray encodedPath = QFile::encodeName(path);
-  FileDescriptor descriptor(open(encodedPath.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
-  struct stat status{};
-  if (descriptor.value < 0 || fstat(descriptor.value, &status) != 0 || !S_ISREG(status.st_mode))
-    return false;
-
-  QCryptographicHash hash(QCryptographicHash::Sha256);
-  std::array<char, 4096> buffer{};
-  for (;;) {
-    const ssize_t count = read(descriptor.value, buffer.data(), buffer.size());
-    if (count == 0)
-      break;
-    if (count < 0) {
-      if (errno == EINTR)
-        continue;
-      return false;
-    }
-    hash.addData(QByteArrayView(buffer.data(), static_cast<qsizetype>(count)));
-  }
-  *digest = hash.result().toHex();
-  return true;
-}
-
-bool writeTemporaryFile(const QString &path, const QByteArray &contents) {
-  const QByteArray encodedPath = QFile::encodeName(path);
-  FileDescriptor descriptor(open(encodedPath.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
-  if (descriptor.value < 0)
-    return false;
-  qsizetype offset = 0;
-  while (offset < contents.size()) {
-    const ssize_t count =
-        write(descriptor.value, contents.constData() + offset, static_cast<size_t>(contents.size() - offset));
-    if (count < 0) {
-      if (errno == EINTR)
-        continue;
-      return false;
-    }
-    if (count == 0)
-      return false;
-    offset += static_cast<qsizetype>(count);
-  }
-  return fsync(descriptor.value) == 0;
-}
-
-bool replaceAtomically(const QString &temporaryPath, const QString &targetPath) {
-  const QByteArray temporary = QFile::encodeName(temporaryPath);
-  const QByteArray target = QFile::encodeName(targetPath);
-  if (rename(temporary.constData(), target.constData()) != 0)
-    return false;
-  const QByteArray directory = QFile::encodeName(QFileInfo(targetPath).dir().canonicalPath());
-  FileDescriptor directoryDescriptor(open(directory.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
-  return directoryDescriptor.value >= 0 && fsync(directoryDescriptor.value) == 0;
-}
-
-std::optional<FileDescriptor> lockTarget(const QString &lockPath) {
-  const QByteArray encoded = QFile::encodeName(lockPath);
-  FileDescriptor descriptor(open(encoded.constData(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600));
-  if (descriptor.value < 0 || flock(descriptor.value, LOCK_EX) != 0)
-    return std::nullopt;
-  return descriptor;
-}
 
 std::optional<Database> openDatabase(const QString &databasePath) {
   sqlite3 *rawDatabase = nullptr;
@@ -184,16 +64,40 @@ bool bindDigest(sqlite3_stmt *statement, int index, const QByteArray &value) {
                              SQLITE_TRANSIENT, SQLITE_UTF8) == SQLITE_OK;
 }
 
+std::optional<QString> textColumn(sqlite3_stmt *statement, int column, bool allowEmpty = false) {
+  if (sqlite3_column_type(statement, column) != SQLITE_TEXT)
+    return std::nullopt;
+  const auto *data = reinterpret_cast<const char *>(sqlite3_column_text(statement, column));
+  const int size = sqlite3_column_bytes(statement, column);
+  if (data == nullptr || size < 0 || (!allowEmpty && size == 0))
+    return std::nullopt;
+  const QByteArray encoded(data, size);
+  QString decoded = QString::fromUtf8(encoded);
+  if (decoded.isNull() || decoded.contains(QChar::ReplacementCharacter) || decoded.toUtf8() != encoded ||
+      (!allowEmpty && !isValidText(decoded))) {
+    return std::nullopt;
+  }
+  return decoded;
+}
+
+std::optional<QByteArray> digestColumn(sqlite3_stmt *statement, int column) {
+  const auto text = textColumn(statement, column);
+  if (!text)
+    return std::nullopt;
+  const QByteArray value = text->toLatin1();
+  return isDigest(value) ? std::optional<QByteArray>(value) : std::nullopt;
+}
+
 bool insertPrepared(sqlite3 *database, const PendingOperation &operation) {
   sqlite3_stmt *rawStatement = nullptr;
   constexpr const char *sql = "INSERT INTO file_operation_log "
-                              "(operation_id, target_path, temporary_path, expected_digest, replacement_digest, state) "
+                              "(operation_id, root_id, relative_path, expected_digest, replacement_digest, state) "
                               "VALUES (?, ?, ?, ?, ?, 'prepared');";
   if (sqlite3_prepare_v2(database, sql, -1, &rawStatement, nullptr) != SQLITE_OK)
     return false;
   std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
-  return bindText(statement.get(), 1, operation.operationId) && bindText(statement.get(), 2, operation.targetPath) &&
-         bindText(statement.get(), 3, operation.temporaryPath) &&
+  return bindText(statement.get(), 1, operation.operationId) && bindText(statement.get(), 2, operation.rootId) &&
+         bindText(statement.get(), 3, operation.relativePath) &&
          bindDigest(statement.get(), 4, operation.expectedDigest) &&
          bindDigest(statement.get(), 5, operation.replacementDigest) && sqlite3_step(statement.get()) == SQLITE_DONE;
 }
@@ -205,11 +109,11 @@ bool setState(sqlite3 *database, const QString &operationId, const char *state, 
   if (sqlite3_prepare_v2(database, sql, -1, &rawStatement, nullptr) != SQLITE_OK)
     return false;
   std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
-  const QString encodedState = QString::fromLatin1(state);
   const bool failureBound = failureCode == nullptr ? sqlite3_bind_null(statement.get(), 2) == SQLITE_OK
                                                    : bindText(statement.get(), 2, QString::fromLatin1(failureCode));
-  return bindText(statement.get(), 1, encodedState) && failureBound && bindText(statement.get(), 3, operationId) &&
-         sqlite3_step(statement.get()) == SQLITE_DONE && sqlite3_changes(database) == 1;
+  return bindText(statement.get(), 1, QString::fromLatin1(state)) && failureBound &&
+         bindText(statement.get(), 3, operationId) && sqlite3_step(statement.get()) == SQLITE_DONE &&
+         sqlite3_changes(database) == 1;
 }
 
 bool markManual(sqlite3 *database, const QString &operationId) {
@@ -224,53 +128,127 @@ bool markCompleted(sqlite3 *database, const QString &operationId, const char *fa
   return setState(database, operationId, "completed", failureCode);
 }
 
-std::optional<QString> textColumn(sqlite3_stmt *statement, int column) {
-  if (sqlite3_column_type(statement, column) != SQLITE_TEXT)
+std::optional<std::optional<PendingOperation>> readOperation(sqlite3 *database, const QString &operationId) {
+  sqlite3_stmt *rawStatement = nullptr;
+  constexpr const char *sql =
+      "SELECT operation_id, root_id, relative_path, expected_digest, replacement_digest, state, "
+      "COALESCE(failure_code, '') FROM file_operation_log WHERE operation_id = ?;";
+  if (sqlite3_prepare_v2(database, sql, -1, &rawStatement, nullptr) != SQLITE_OK)
     return std::nullopt;
-  const auto *data = reinterpret_cast<const char *>(sqlite3_column_text(statement, column));
-  const int size = sqlite3_column_bytes(statement, column);
-  if (data == nullptr || size <= 0)
+  std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
+  if (!bindText(statement.get(), 1, operationId))
     return std::nullopt;
-  const QByteArray encoded(data, size);
-  QString decoded = QString::fromUtf8(encoded);
-  if (decoded.isNull() || decoded.contains(QChar::ReplacementCharacter) || decoded.toUtf8() != encoded ||
-      !isValidText(decoded))
+  const int result = sqlite3_step(statement.get());
+  if (result == SQLITE_DONE)
+    return std::optional<PendingOperation>{};
+  if (result != SQLITE_ROW)
     return std::nullopt;
-  return decoded;
-}
-
-std::optional<QByteArray> digestColumn(sqlite3_stmt *statement, int column) {
-  const auto text = textColumn(statement, column);
-  if (!text)
+  const auto id = textColumn(statement.get(), 0);
+  const auto rootId = textColumn(statement.get(), 1);
+  const auto relativePath = textColumn(statement.get(), 2);
+  const auto expectedDigest = digestColumn(statement.get(), 3);
+  const auto replacementDigest = digestColumn(statement.get(), 4);
+  const auto state = textColumn(statement.get(), 5);
+  const auto failureCode = textColumn(statement.get(), 6, true);
+  if (!id || !rootId || !relativePath || !expectedDigest || !replacementDigest || !state || !failureCode ||
+      sqlite3_step(statement.get()) != SQLITE_DONE) {
     return std::nullopt;
-  const QByteArray value = text->toLatin1();
-  return isDigest(value) ? std::optional<QByteArray>(value) : std::nullopt;
+  }
+  return PendingOperation{*id, *rootId, *relativePath, *expectedDigest, *replacementDigest, *state, *failureCode};
 }
 
 std::optional<std::vector<PendingOperation>> readPending(sqlite3 *database) {
   sqlite3_stmt *rawStatement = nullptr;
   constexpr const char *sql =
-      "SELECT operation_id, target_path, temporary_path, expected_digest, replacement_digest, state "
-      "FROM file_operation_log WHERE state <> 'completed' ORDER BY operation_id;";
+      "SELECT operation_id, root_id, relative_path, expected_digest, replacement_digest, state, "
+      "COALESCE(failure_code, '') FROM file_operation_log WHERE state <> 'completed' "
+      "ORDER BY operation_id;";
   if (sqlite3_prepare_v2(database, sql, -1, &rawStatement, nullptr) != SQLITE_OK)
     return std::nullopt;
   std::unique_ptr<sqlite3_stmt, decltype(&sqlite3_finalize)> statement(rawStatement, sqlite3_finalize);
   std::vector<PendingOperation> operations;
   int result = SQLITE_OK;
   while ((result = sqlite3_step(statement.get())) == SQLITE_ROW) {
-    const auto operationId = textColumn(statement.get(), 0);
-    const auto target = textColumn(statement.get(), 1);
-    const auto temporary = textColumn(statement.get(), 2);
-    const auto expected = digestColumn(statement.get(), 3);
-    const auto replacement = digestColumn(statement.get(), 4);
+    const auto id = textColumn(statement.get(), 0);
+    const auto rootId = textColumn(statement.get(), 1);
+    const auto relativePath = textColumn(statement.get(), 2);
+    const auto expectedDigest = digestColumn(statement.get(), 3);
+    const auto replacementDigest = digestColumn(statement.get(), 4);
     const auto state = textColumn(statement.get(), 5);
-    if (!operationId || !target || !temporary || !expected || !replacement || !state)
+    const auto failureCode = textColumn(statement.get(), 6, true);
+    if (!id || !rootId || !relativePath || !expectedDigest || !replacementDigest || !state || !failureCode)
       return std::nullopt;
-    operations.push_back({*operationId, *target, *temporary, *expected, *replacement, *state});
+    operations.push_back({*id, *rootId, *relativePath, *expectedDigest, *replacementDigest, *state, *failureCode});
   }
-  if (result != SQLITE_DONE)
-    return std::nullopt;
-  return operations;
+  return result == SQLITE_DONE ? std::optional<std::vector<PendingOperation>>(std::move(operations)) : std::nullopt;
+}
+
+QByteArray digest(const QByteArray &contents) {
+  return QCryptographicHash::hash(contents, QCryptographicHash::Sha256).toHex();
+}
+
+bool sameIntent(const PendingOperation &operation, const QString &rootId, const QString &relativePath,
+                const QByteArray &expectedDigest, const QByteArray &replacementDigest) {
+  return operation.rootId == rootId && operation.relativePath == relativePath &&
+         operation.expectedDigest == expectedDigest && operation.replacementDigest == replacementDigest;
+}
+
+FileOperationResult persistedResult(const PendingOperation &operation) {
+  if (operation.state == "completed") {
+    if (operation.failureCode == "baseline_conflict")
+      return {FileOperationCode::baseline_conflict, operation.operationId};
+    if (operation.failureCode == "write_failed")
+      return {FileOperationCode::write_failed, operation.operationId};
+    return {FileOperationCode::none, operation.operationId};
+  }
+  if (operation.state == "temporary_written")
+    return {FileOperationCode::recovery_required, operation.operationId};
+  if (operation.state == "manual_intervention_required")
+    return {FileOperationCode::manual_intervention_required, operation.operationId};
+  return {FileOperationCode::storage_unavailable, operation.operationId};
+}
+
+FileOperationResult executePrepared(sqlite3 *database, const ResourceResolver &resolver,
+                                    const PendingOperation &operation, const QByteArray &replacementContents,
+                                    FileOperationFault fault) {
+  const auto replacement =
+      resolver.openForAtomicReplacement(operation.rootId, operation.relativePath, operation.operationId);
+  if (!replacement.isAccepted()) {
+    markManual(database, operation.operationId);
+    return {FileOperationCode::resource_rejected, operation.operationId, replacement.rejection};
+  }
+  QByteArray currentContents;
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  if (!replacement.handle->readTargetAll(&currentContents, &rejection)) {
+    markManual(database, operation.operationId);
+    return {FileOperationCode::resource_rejected, operation.operationId, rejection};
+  }
+  if (digest(currentContents) != operation.expectedDigest) {
+    return {markCompleted(database, operation.operationId, "baseline_conflict")
+                ? FileOperationCode::baseline_conflict
+                : FileOperationCode::manual_intervention_required,
+            operation.operationId};
+  }
+  if (!replacement.handle->writeTemporaryAndSync(replacementContents, &rejection)) {
+    QByteArray temporaryContents;
+    if (!replacement.handle->readTemporaryAll(&temporaryContents, &rejection) ||
+        digest(temporaryContents) != operation.replacementDigest) {
+      return {markCompleted(database, operation.operationId, "write_failed")
+                  ? FileOperationCode::write_failed
+                  : FileOperationCode::manual_intervention_required,
+              operation.operationId};
+    }
+  }
+  if (!markTemporaryWritten(database, operation.operationId))
+    return {FileOperationCode::manual_intervention_required, operation.operationId};
+  if (fault == FileOperationFault::after_temporary_written)
+    return {FileOperationCode::recovery_required, operation.operationId};
+  if (!replacement.handle->readTargetAll(&currentContents, &rejection) ||
+      digest(currentContents) != operation.expectedDigest || !replacement.handle->replaceTemporaryAndSync(&rejection) ||
+      !markCompleted(database, operation.operationId)) {
+    return {FileOperationCode::manual_intervention_required, operation.operationId, rejection};
+  }
+  return {FileOperationCode::none, operation.operationId};
 }
 
 } // namespace
@@ -291,6 +269,10 @@ const char *fileOperationCodeName(FileOperationCode code) {
     return "recovery_required";
   case FileOperationCode::manual_intervention_required:
     return "manual_intervention_required";
+  case FileOperationCode::operation_id_conflict:
+    return "operation_id_conflict";
+  case FileOperationCode::resource_rejected:
+    return "resource_rejected";
   }
   return "storage_unavailable";
 }
@@ -302,52 +284,43 @@ bool FileRecoveryReport::isSucceeded() const { return code == FileOperationCode:
 FileOperationLog::FileOperationLog(QString databasePath, FileOperationFault fault)
     : databasePath_(std::move(databasePath)), fault_(fault) {}
 
-FileOperationResult FileOperationLog::replaceIfUnchanged(const QString &targetPath,
+FileOperationResult FileOperationLog::replaceIfUnchanged(const ResourceResolver &resolver, const QString &rootId,
+                                                         const QString &relativePath, const QString &operationId,
                                                          const QByteArray &expectedBaselineSha256,
                                                          const QByteArray &replacementContents) const {
-  if (!isDigest(expectedBaselineSha256))
-    return {FileOperationCode::invalid_argument, {}};
-  const QString operationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
-  const auto paths = targetPaths(targetPath, operationId);
-  if (!paths)
-    return {FileOperationCode::invalid_argument, {}};
-  const QByteArray replacementDigest =
-      QCryptographicHash::hash(replacementContents, QCryptographicHash::Sha256).toHex();
-  PendingOperation operation{operationId,       paths->target, paths->temporary, expectedBaselineSha256,
-                             replacementDigest, "prepared"};
+  if (!isValidText(rootId) || !isValidText(relativePath) || !isValidText(operationId) ||
+      !isDigest(expectedBaselineSha256)) {
+    return {FileOperationCode::invalid_argument, operationId};
+  }
+  const QByteArray replacementDigest = digest(replacementContents);
   const auto database = openDatabase(databasePath_);
-  if (!database || !insertPrepared(database->get(), operation))
+  if (!database)
     return {FileOperationCode::storage_unavailable, operationId};
-  const auto lock = lockTarget(paths->lock);
-  QByteArray currentDigest;
-  if (!lock || !readDigest(paths->target, &currentDigest)) {
-    markManual(database->get(), operationId);
-    return {FileOperationCode::manual_intervention_required, operationId};
+  auto stored = readOperation(database->get(), operationId);
+  if (!stored)
+    return {FileOperationCode::storage_unavailable, operationId};
+  if (!stored->has_value()) {
+    const PendingOperation prepared{operationId, rootId, relativePath, expectedBaselineSha256, replacementDigest,
+                                    "prepared",  {}};
+    if (!insertPrepared(database->get(), prepared)) {
+      stored = readOperation(database->get(), operationId);
+      if (!stored || !stored->has_value())
+        return {FileOperationCode::storage_unavailable, operationId};
+    } else {
+      stored = prepared;
+    }
   }
-  if (currentDigest != expectedBaselineSha256) {
-    return {markCompleted(database->get(), operationId, "baseline_conflict")
-                ? FileOperationCode::baseline_conflict
-                : FileOperationCode::manual_intervention_required,
-            operationId};
-  }
-  if (!writeTemporaryFile(paths->temporary, replacementContents)) {
-    return {markCompleted(database->get(), operationId, "write_failed")
-                ? FileOperationCode::write_failed
-                : FileOperationCode::manual_intervention_required,
-            operationId};
-  }
-  if (!markTemporaryWritten(database->get(), operationId))
-    return {FileOperationCode::manual_intervention_required, operationId};
-  if (fault_ == FileOperationFault::after_temporary_written)
-    return {FileOperationCode::recovery_required, operationId};
-  QByteArray recheckedDigest;
-  if (!readDigest(paths->target, &recheckedDigest) || recheckedDigest != expectedBaselineSha256 ||
-      !replaceAtomically(paths->temporary, paths->target) || !markCompleted(database->get(), operationId))
-    return {FileOperationCode::manual_intervention_required, operationId};
-  return {FileOperationCode::none, operationId};
+  if (!stored || !stored->has_value())
+    return {FileOperationCode::storage_unavailable, operationId};
+  const PendingOperation &operation = stored->value();
+  if (!sameIntent(operation, rootId, relativePath, expectedBaselineSha256, replacementDigest))
+    return {FileOperationCode::operation_id_conflict, operationId};
+  if (operation.state != "prepared")
+    return persistedResult(operation);
+  return executePrepared(database->get(), resolver, operation, replacementContents, fault_);
 }
 
-FileRecoveryReport FileOperationLog::recoverPending() const {
+FileRecoveryReport FileOperationLog::recoverPending(const ResourceResolver &resolver) const {
   const auto database = openDatabase(databasePath_);
   if (!database)
     return {FileOperationCode::storage_unavailable, 0, 0, {}};
@@ -359,17 +332,16 @@ FileRecoveryReport FileOperationLog::recoverPending() const {
   for (const PendingOperation &operation : *pending) {
     bool recovered = false;
     if (operation.state == "temporary_written") {
-      const QFileInfo targetInformation(operation.targetPath);
-      const QFileInfo temporaryInformation(operation.temporaryPath);
-      const auto lock = targetPaths(operation.targetPath, operation.operationId);
-      QByteArray targetDigest;
-      QByteArray temporaryDigest;
-      if (lock && lock->temporary == operation.temporaryPath && targetInformation.exists() &&
-          targetInformation.isFile() && !targetInformation.isSymLink() && temporaryInformation.exists() &&
-          temporaryInformation.isFile() && !temporaryInformation.isSymLink() && lockTarget(lock->lock) &&
-          readDigest(operation.targetPath, &targetDigest) && readDigest(operation.temporaryPath, &temporaryDigest) &&
-          targetDigest == operation.expectedDigest && temporaryDigest == operation.replacementDigest &&
-          replaceAtomically(operation.temporaryPath, operation.targetPath) &&
+      const auto replacement =
+          resolver.openForAtomicReplacement(operation.rootId, operation.relativePath, operation.operationId);
+      QByteArray targetContents;
+      QByteArray temporaryContents;
+      ResourceRejectCode rejection = ResourceRejectCode::none;
+      if (replacement.isAccepted() && replacement.handle->readTargetAll(&targetContents, &rejection) &&
+          replacement.handle->readTemporaryAll(&temporaryContents, &rejection) &&
+          digest(targetContents) == operation.expectedDigest &&
+          digest(temporaryContents) == operation.replacementDigest &&
+          replacement.handle->replaceTemporaryAndSync(&rejection) &&
           markCompleted(database->get(), operation.operationId)) {
         recovered = true;
       }

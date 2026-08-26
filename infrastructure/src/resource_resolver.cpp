@@ -1,11 +1,13 @@
 #include "pros/infrastructure/resource_resolver.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QDirIterator>
 #include <QFileInfo>
 #include <QUuid>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -188,6 +190,117 @@ FileDescriptor openRelative(FileDescriptor directory, const QStringList &compone
   return directory;
 }
 
+bool verifyUsableRoot(const ResourceRootState &root, ResourceRejectCode *rejection) {
+  if (root.revoked.load()) {
+    *rejection = ResourceRejectCode::root_revoked;
+    return false;
+  }
+  if (const auto rootRejection = verifyRootIdentity(root); rootRejection.has_value()) {
+    *rejection = *rootRejection;
+    return false;
+  }
+  return true;
+}
+
+FileDescriptor openParentDirectory(FileDescriptor directory, const QStringList &components,
+                                   ResourceRejectCode *rejection) {
+  for (qsizetype index = 0; index + 1 < components.size(); ++index) {
+    const QByteArray name = QFile::encodeName(components.at(index));
+    FileDescriptor next(openat(directory.value, name.constData(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC));
+    if (!next.isValid()) {
+      *rejection = errno == ELOOP    ? ResourceRejectCode::symlink_forbidden
+                   : errno == ENOENT ? ResourceRejectCode::resource_not_found
+                                     : ResourceRejectCode::resource_open_failed;
+      return FileDescriptor();
+    }
+    directory = std::move(next);
+  }
+  return directory;
+}
+
+bool readRegularAt(const ResourceRootState &root, int parentDescriptor, const QString &name, QByteArray *contents,
+                   ResourceRejectCode *rejection) {
+  if (contents == nullptr) {
+    *rejection = ResourceRejectCode::resource_open_failed;
+    return false;
+  }
+  if (!verifyUsableRoot(root, rejection))
+    return false;
+  const QByteArray encodedName = QFile::encodeName(name);
+  FileDescriptor descriptor(openat(parentDescriptor, encodedName.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC));
+  struct stat status{};
+  if (!descriptor.isValid() || fstat(descriptor.value, &status) != 0 || !S_ISREG(status.st_mode)) {
+    *rejection = descriptor.isValid() && !S_ISREG(status.st_mode) ? ResourceRejectCode::resource_not_regular_file
+                                                                  : ResourceRejectCode::resource_open_failed;
+    return false;
+  }
+  QByteArray result;
+  std::array<char, 4096> buffer{};
+  for (;;) {
+    const ssize_t count = read(descriptor.value, buffer.data(), buffer.size());
+    if (count == 0)
+      break;
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      *rejection = ResourceRejectCode::resource_open_failed;
+      return false;
+    }
+    result.append(buffer.data(), static_cast<qsizetype>(count));
+  }
+  if (!verifyUsableRoot(root, rejection))
+    return false;
+  *contents = std::move(result);
+  *rejection = ResourceRejectCode::none;
+  return true;
+}
+
+bool writeRegularExclusivelyAt(const ResourceRootState &root, int parentDescriptor, const QString &name,
+                               const QByteArray &contents, ResourceRejectCode *rejection) {
+  if (!verifyUsableRoot(root, rejection))
+    return false;
+  const QByteArray encodedName = QFile::encodeName(name);
+  FileDescriptor descriptor(
+      openat(parentDescriptor, encodedName.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600));
+  if (!descriptor.isValid()) {
+    *rejection = errno == ELOOP ? ResourceRejectCode::symlink_forbidden : ResourceRejectCode::resource_open_failed;
+    return false;
+  }
+  qsizetype offset = 0;
+  while (offset < contents.size()) {
+    const ssize_t count =
+        write(descriptor.value, contents.constData() + offset, static_cast<size_t>(contents.size() - offset));
+    if (count < 0) {
+      if (errno == EINTR)
+        continue;
+      *rejection = ResourceRejectCode::resource_open_failed;
+      return false;
+    }
+    if (count == 0) {
+      *rejection = ResourceRejectCode::resource_open_failed;
+      return false;
+    }
+    offset += static_cast<qsizetype>(count);
+  }
+  if (fsync(descriptor.value) != 0) {
+    *rejection = ResourceRejectCode::resource_open_failed;
+    return false;
+  }
+  if (!verifyUsableRoot(root, rejection))
+    return false;
+  *rejection = ResourceRejectCode::none;
+  return true;
+}
+
+QString temporaryName(const QString &targetName, const QString &operationId) {
+  const QByteArray suffix = QCryptographicHash::hash(operationId.toUtf8(), QCryptographicHash::Sha256).toHex();
+  return "." + targetName + ".pros-" + QString::fromLatin1(suffix.left(24)) + ".tmp";
+}
+
+ResourceReplacementResult rejectedReplacement(ResourceRejectCode rejection) {
+  return {.rejection = rejection, .handle = nullptr};
+}
+
 } // namespace
 
 struct ResourceResolver::Impl final {
@@ -279,9 +392,72 @@ bool ResourceHandle::readAll(QByteArray *contents, ResourceRejectCode *rejection
 
 ResourceIdentity ResourceHandle::identity() const { return identity_; }
 
+ResourceReplacementHandle::ResourceReplacementHandle(std::shared_ptr<ResourceRootState> root, int parentDescriptor,
+                                                     int lockDescriptor, QString targetName, QString temporaryName)
+    : root_(std::move(root)), parentDescriptor_(parentDescriptor), lockDescriptor_(lockDescriptor),
+      targetName_(std::move(targetName)), temporaryName_(std::move(temporaryName)) {}
+
+ResourceReplacementHandle::~ResourceReplacementHandle() {
+  if (lockDescriptor_ >= 0)
+    close(lockDescriptor_);
+  if (parentDescriptor_ >= 0)
+    close(parentDescriptor_);
+}
+
+bool ResourceReplacementHandle::readTargetAll(QByteArray *contents, ResourceRejectCode *rejection) const {
+  ResourceRejectCode localRejection = ResourceRejectCode::none;
+  const bool succeeded = readRegularAt(*root_, parentDescriptor_, targetName_, contents, &localRejection);
+  if (rejection != nullptr)
+    *rejection = localRejection;
+  return succeeded;
+}
+
+bool ResourceReplacementHandle::writeTemporaryAndSync(const QByteArray &contents, ResourceRejectCode *rejection) const {
+  ResourceRejectCode localRejection = ResourceRejectCode::none;
+  const bool succeeded =
+      writeRegularExclusivelyAt(*root_, parentDescriptor_, temporaryName_, contents, &localRejection);
+  if (rejection != nullptr)
+    *rejection = localRejection;
+  return succeeded;
+}
+
+bool ResourceReplacementHandle::readTemporaryAll(QByteArray *contents, ResourceRejectCode *rejection) const {
+  ResourceRejectCode localRejection = ResourceRejectCode::none;
+  const bool succeeded = readRegularAt(*root_, parentDescriptor_, temporaryName_, contents, &localRejection);
+  if (rejection != nullptr)
+    *rejection = localRejection;
+  return succeeded;
+}
+
+bool ResourceReplacementHandle::replaceTemporaryAndSync(ResourceRejectCode *rejection) const {
+  ResourceRejectCode localRejection = ResourceRejectCode::none;
+  if (!verifyUsableRoot(*root_, &localRejection)) {
+    if (rejection != nullptr)
+      *rejection = localRejection;
+    return false;
+  }
+  const QByteArray temporary = QFile::encodeName(temporaryName_);
+  const QByteArray target = QFile::encodeName(targetName_);
+  if (renameat(parentDescriptor_, temporary.constData(), parentDescriptor_, target.constData()) != 0 ||
+      fsync(parentDescriptor_) != 0 || !verifyUsableRoot(*root_, &localRejection)) {
+    if (localRejection == ResourceRejectCode::none)
+      localRejection = ResourceRejectCode::resource_open_failed;
+    if (rejection != nullptr)
+      *rejection = localRejection;
+    return false;
+  }
+  if (rejection != nullptr)
+    *rejection = ResourceRejectCode::none;
+  return true;
+}
+
 bool ResourceRootResult::isAccepted() const { return root.has_value() && rejection == ResourceRejectCode::none; }
 
 bool ResourceOpenResult::isAccepted() const { return handle != nullptr && rejection == ResourceRejectCode::none; }
+
+bool ResourceReplacementResult::isAccepted() const {
+  return handle != nullptr && rejection == ResourceRejectCode::none;
+}
 
 bool ResourceListResult::isAccepted() const { return rejection == ResourceRejectCode::none; }
 
@@ -389,6 +565,47 @@ ResourceOpenResult ResourceResolver::resolveAndOpen(const QString &rootId, const
               new ResourceHandle(root, resource.release(),
                                  ResourceIdentity{.device = static_cast<quint64>(status.st_dev),
                                                   .inode = static_cast<quint64>(status.st_ino)}))};
+}
+
+ResourceReplacementResult ResourceResolver::openForAtomicReplacement(const QString &rootId, const QString &relativePath,
+                                                                     const QString &operationId) const {
+  std::shared_ptr<ResourceRootState> root;
+  {
+    std::lock_guard lock(impl_->mutex);
+    const auto found = impl_->roots.find(rootId);
+    if (found == impl_->roots.end())
+      return rejectedReplacement(ResourceRejectCode::root_not_found);
+    root = found->second;
+  }
+  if (root->access != ResourceAccess::read_write)
+    return rejectedReplacement(ResourceRejectCode::access_denied);
+  ResourceRejectCode rejection = ResourceRejectCode::none;
+  if (!verifyUsableRoot(*root, &rejection))
+    return rejectedReplacement(rejection);
+  const auto components = relativeComponents(relativePath, &rejection);
+  if (!components || operationId.isEmpty() || operationId.contains(QChar::Null))
+    return rejectedReplacement(components ? ResourceRejectCode::invalid_relative_path : rejection);
+  FileDescriptor rootDirectory = openDirectory(*root, &rejection);
+  if (!rootDirectory.isValid())
+    return rejectedReplacement(rejection);
+  FileDescriptor parent = openParentDirectory(std::move(rootDirectory), *components, &rejection);
+  if (!parent.isValid())
+    return rejectedReplacement(rejection);
+  QByteArray targetContents;
+  if (!readRegularAt(*root, parent.value, components->back(), &targetContents, &rejection))
+    return rejectedReplacement(rejection);
+  const QString lockName = "." + components->back() + ".pros.lock";
+  const QByteArray encodedLockName = QFile::encodeName(lockName);
+  FileDescriptor lockDescriptor(
+      openat(parent.value, encodedLockName.constData(), O_WRONLY | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0600));
+  if (!lockDescriptor.isValid() || flock(lockDescriptor.value, LOCK_EX) != 0)
+    return rejectedReplacement(ResourceRejectCode::resource_open_failed);
+  if (!verifyUsableRoot(*root, &rejection))
+    return rejectedReplacement(rejection);
+  return {.rejection = ResourceRejectCode::none,
+          .handle = std::unique_ptr<ResourceReplacementHandle>(
+              new ResourceReplacementHandle(root, parent.release(), lockDescriptor.release(), components->back(),
+                                            temporaryName(components->back(), operationId)))};
 }
 
 ResourceListResult ResourceResolver::listRegularFiles(const QString &rootId) const {
