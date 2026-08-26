@@ -1,6 +1,12 @@
 add_library(pros_infrastructure STATIC
+  src/command_composition.cpp
+  src/governance_composition.cpp
   src/local_data_directory.cpp
   src/schema_migrator.cpp
+  src/sqlite_approval_command_handler.cpp
+  src/sqlite_command_transaction.cpp
+  src/sqlite_work_command_handler.cpp
+  src/sqlite_work_query_service.cpp
 )
 
 target_include_directories(pros_infrastructure PUBLIC include)
