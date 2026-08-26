@@ -1,4 +1,5 @@
-# macOS 14 arm64 S0 toolchain contract. Update only with TASK-V01-003 evidence.
+# S5 发布阶段工具链锁定基线；开发期 scripts/check.sh 不读取本文件。
+# 更新必须附带发布环境、二进制来源和哈希证据。
 PROS_HOMEBREW_REVISION=0942cac2eda7648d4857f4e5da60f1de303b6818
 PROS_HOMEBREW_CORE_REVISION=802261799dab04efc7e6eab7d77dd1c5eb4037cf
 PROS_CMAKE_VERSION=4.4.2

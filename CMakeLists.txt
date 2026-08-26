@@ -12,8 +12,8 @@ set(CMAKE_AUTORCC ON)
 
 option(PERSONAL_RESEARCH_OS_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" ON)
 
-find_package(Qt6 6.11.1 EXACT REQUIRED COMPONENTS Core Widgets Test)
-find_package(SQLite3 3.53.4 EXACT REQUIRED)
+find_package(Qt6 6.8 REQUIRED COMPONENTS Core Widgets Test)
+find_package(SQLite3 3.35 REQUIRED)
 
 function(pros_enable_warnings target)
   if(MSVC)
