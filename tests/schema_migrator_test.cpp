@@ -4,13 +4,29 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <sqlite3.h>
+
+namespace {
+void createMetadata(const QString &path, const QString &values) {
+  sqlite3 *database = nullptr;
+  QVERIFY(sqlite3_open(path.toUtf8().constData(), &database) == SQLITE_OK);
+  QVERIFY(sqlite3_exec(database, "CREATE TABLE schema_metadata (schema_version INTEGER NOT NULL);", nullptr, nullptr,
+                       nullptr) == SQLITE_OK);
+  const QString statement = "INSERT INTO schema_metadata (schema_version) VALUES " + values + ";";
+  QVERIFY(sqlite3_exec(database, statement.toUtf8().constData(), nullptr, nullptr, nullptr) == SQLITE_OK);
+  sqlite3_close(database);
+}
+} // namespace
+
 class SchemaMigratorTest final : public QObject {
   Q_OBJECT
 
- private slots:
+private slots:
   void createsCurrentSchemaFromEmptyDatabase();
   void canRunCurrentMigrationMoreThanOnce();
   void rejectsDirectoryAsDatabasePath();
+  void rejectsUnsupportedOrAmbiguousMetadata();
+  void rejectsAmbiguousMetadataWhenReadingVersion();
 };
 
 void SchemaMigratorTest::createsCurrentSchemaFromEmptyDatabase() {
@@ -43,6 +59,33 @@ void SchemaMigratorTest::rejectsDirectoryAsDatabasePath() {
   QString errorMessage;
 
   QVERIFY(!migrator.migrate(temporaryDirectory.path(), &errorMessage));
+  QVERIFY(!errorMessage.isEmpty());
+}
+
+void SchemaMigratorTest::rejectsUnsupportedOrAmbiguousMetadata() {
+  QTemporaryDir temporaryDirectory;
+  QVERIFY(temporaryDirectory.isValid());
+  pros::infrastructure::SchemaMigrator migrator;
+  QString errorMessage;
+
+  const QString futureDatabase = temporaryDirectory.path() + "/future.sqlite";
+  createMetadata(futureDatabase, "(2)");
+  QVERIFY(!migrator.migrate(futureDatabase, &errorMessage));
+
+  const QString duplicateDatabase = temporaryDirectory.path() + "/duplicate.sqlite";
+  createMetadata(duplicateDatabase, "(1), (1)");
+  QVERIFY(!migrator.migrate(duplicateDatabase, &errorMessage));
+}
+
+void SchemaMigratorTest::rejectsAmbiguousMetadataWhenReadingVersion() {
+  QTemporaryDir temporaryDirectory;
+  QVERIFY(temporaryDirectory.isValid());
+  const QString databasePath = temporaryDirectory.path() + "/duplicate-read.sqlite";
+  createMetadata(databasePath, "(1), (1)");
+
+  pros::infrastructure::SchemaMigrator migrator;
+  QString errorMessage;
+  QCOMPARE(migrator.schemaVersion(databasePath, &errorMessage), -1);
   QVERIFY(!errorMessage.isEmpty());
 }
 

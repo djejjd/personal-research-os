@@ -6,15 +6,21 @@
 namespace pros::application {
 
 class AppConfig final {
- public:
-  static AppConfig fromArguments(const QStringList& arguments);
+public:
+  /**
+   * 从进程参数创建本地应用配置。
+   *
+   * @throws std::invalid_argument 参数缺失、重复或 `--data-dir` 值为空时抛出；不会创建目录或访问磁盘。
+   */
+  static AppConfig fromArguments(const QStringList &arguments);
 
-  [[nodiscard]] const QString& dataDirectory() const;
+  /** @return 已验证但尚未创建的数据目录路径。 */
+  [[nodiscard]] const QString &dataDirectory() const;
 
- private:
+private:
   explicit AppConfig(QString dataDirectory);
 
   QString dataDirectory_;
 };
 
-}  // namespace pros::application
+} // namespace pros::application

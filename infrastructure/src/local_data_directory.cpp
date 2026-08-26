@@ -5,7 +5,7 @@
 
 namespace pros::infrastructure {
 
-bool LocalDataDirectory::ensureExists(const QString& path, QString* errorMessage) {
+bool LocalDataDirectory::ensureExists(const QString &path, QString *errorMessage) {
   const QFileInfo target(path);
   if (target.exists() && !target.isDir()) {
     if (errorMessage != nullptr) {
@@ -32,4 +32,4 @@ bool LocalDataDirectory::ensureExists(const QString& path, QString* errorMessage
   return true;
 }
 
-}  // namespace pros::infrastructure
+} // namespace pros::infrastructure

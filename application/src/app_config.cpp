@@ -9,7 +9,7 @@ namespace pros::application {
 
 AppConfig::AppConfig(QString dataDirectory) : dataDirectory_(std::move(dataDirectory)) {}
 
-AppConfig AppConfig::fromArguments(const QStringList& arguments) {
+AppConfig AppConfig::fromArguments(const QStringList &arguments) {
   QString dataDirectory;
 
   for (qsizetype index = 1; index < arguments.size(); ++index) {
@@ -31,6 +31,6 @@ AppConfig AppConfig::fromArguments(const QStringList& arguments) {
   return AppConfig(QDir::cleanPath(dataDirectory));
 }
 
-const QString& AppConfig::dataDirectory() const { return dataDirectory_; }
+const QString &AppConfig::dataDirectory() const { return dataDirectory_; }
 
-}  // namespace pros::application
+} // namespace pros::application

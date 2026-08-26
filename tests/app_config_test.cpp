@@ -7,7 +7,7 @@
 class AppConfigTest final : public QObject {
   Q_OBJECT
 
- private slots:
+private slots:
   void usesExplicitDataDirectory();
   void rejectsMissingDataDirectoryValue();
 };
@@ -20,8 +20,7 @@ void AppConfigTest::usesExplicitDataDirectory() {
 }
 
 void AppConfigTest::rejectsMissingDataDirectoryValue() {
-  QVERIFY_THROWS_EXCEPTION(std::invalid_argument,
-                            pros::application::AppConfig::fromArguments({"app", "--data-dir"}));
+  QVERIFY_THROWS_EXCEPTION(std::invalid_argument, pros::application::AppConfig::fromArguments({"app", "--data-dir"}));
 }
 
 QTEST_APPLESS_MAIN(AppConfigTest)

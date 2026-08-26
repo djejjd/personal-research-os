@@ -36,9 +36,9 @@ jobs:
         run: |
           echo 'CMake projects must provide scripts/check.sh.' >&2
           exit 1
-      - name: Install build dependencies
+      - name: Install build and static-analysis dependencies
         if: ${{ hashFiles('CMakeLists.txt') != '' }}
-        run: brew install cmake ninja qt
+        run: brew install cmake ninja qt llvm
       - name: Run local check entrypoint
         if: ${{ hashFiles('scripts/check.sh') != '' }}
         run: scripts/check.sh

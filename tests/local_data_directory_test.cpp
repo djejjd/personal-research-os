@@ -8,7 +8,7 @@
 class LocalDataDirectoryTest final : public QObject {
   Q_OBJECT
 
- private slots:
+private slots:
   void createsMissingDirectory();
   void rejectsFileAsDirectory();
 };
