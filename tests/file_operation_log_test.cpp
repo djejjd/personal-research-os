@@ -267,11 +267,11 @@ void FileOperationLogTest::serializesConcurrentRecoveryForSameOperationId() {
   ResourceResolver resolver;
   const QString rootId = registerWritableRoot(resolver, directory.path());
   QVERIFY(!rootId.isEmpty());
-  pros::infrastructure::FileOperationLog interrupted(
-      databasePath, pros::infrastructure::FileOperationFault::after_temporary_written);
-  QCOMPARE(interrupted.replaceIfUnchanged(resolver, rootId, "entry.md", "same-recovery", digest("before"), "after")
-               .code,
-           pros::infrastructure::FileOperationCode::recovery_required);
+  pros::infrastructure::FileOperationLog interrupted(databasePath,
+                                                     pros::infrastructure::FileOperationFault::after_temporary_written);
+  QCOMPARE(
+      interrupted.replaceIfUnchanged(resolver, rootId, "entry.md", "same-recovery", digest("before"), "after").code,
+      pros::infrastructure::FileOperationCode::recovery_required);
 
   std::barrier start(3);
   std::array<pros::infrastructure::FileRecoveryReport, 2> reports{};
