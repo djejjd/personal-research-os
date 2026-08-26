@@ -132,6 +132,18 @@ const TableDefinition &fileOperationLogTable() {
   return table;
 }
 
+const TableDefinition &projectProvisioningTable() {
+  static const TableDefinition table{
+      "project_provisioning_operations",
+      "CREATE TABLE IF NOT EXISTS project_provisioning_operations (operation_id TEXT PRIMARY KEY, project_id TEXT NOT "
+      "NULL UNIQUE REFERENCES projects(id), title TEXT NOT NULL, asset_name TEXT NOT NULL, asset_digest TEXT CHECK("
+      "asset_digest IS NULL OR length(asset_digest) = 64), state TEXT NOT NULL CHECK(state IN ('provisioning', "
+      "'ready', "
+      "'failed')), failure_code TEXT, CHECK((state IN ('provisioning', 'ready') AND failure_code IS NULL) OR (state = "
+      "'failed' AND failure_code IN ('asset_collision', 'manual_intervention_required', 'safe_abandoned'))));"};
+  return table;
+}
+
 std::optional<std::vector<std::string>> queryRows(sqlite3 *database, const std::string &sql, int columnCount) {
   sqlite3_stmt *rawStatement = nullptr;
   if (sqlite3_prepare_v2(database, sql.c_str(), -1, &rawStatement, nullptr) != SQLITE_OK)
@@ -327,6 +339,12 @@ bool ensureS2Schema(sqlite3 *database, QString *errorMessage) {
          tableMatchesDefinition(database, fileOperationLogTable(), errorMessage);
 }
 
+bool ensureS3Schema(sqlite3 *database, QString *errorMessage) {
+  return ensureS2Schema(database, errorMessage) &&
+         execute(database, projectProvisioningTable().createSql, errorMessage) &&
+         tableMatchesDefinition(database, projectProvisioningTable(), errorMessage);
+}
+
 bool migrateV1ToV2(sqlite3 *database, QString *errorMessage) {
   return ensureS1Schema(database, errorMessage) &&
          execute(database, "UPDATE schema_metadata SET schema_version = 2 WHERE schema_version = 1;", errorMessage) &&
@@ -336,6 +354,12 @@ bool migrateV1ToV2(sqlite3 *database, QString *errorMessage) {
 bool migrateV2ToV3(sqlite3 *database, QString *errorMessage) {
   return ensureS2Schema(database, errorMessage) &&
          execute(database, "UPDATE schema_metadata SET schema_version = 3 WHERE schema_version = 2;", errorMessage) &&
+         sqlite3_changes(database) == 1;
+}
+
+bool migrateV3ToV4(sqlite3 *database, QString *errorMessage) {
+  return ensureS3Schema(database, errorMessage) &&
+         execute(database, "UPDATE schema_metadata SET schema_version = 4 WHERE schema_version = 3;", errorMessage) &&
          sqlite3_changes(database) == 1;
 }
 
@@ -407,12 +431,14 @@ bool SchemaMigrator::migrate(const QString &databasePath, QString *errorMessage)
       if (!versionValid || !version.has_value()) {
         migrated = false;
       } else if (*version == domain::kCurrentSchemaVersion) {
-        migrated = ensureS2Schema(database, errorMessage);
+        migrated = ensureS3Schema(database, errorMessage);
         break;
       } else if (*version == 1) {
         migrated = migrateV1ToV2(database, errorMessage);
       } else if (*version == 2) {
         migrated = migrateV2ToV3(database, errorMessage);
+      } else if (*version == 3) {
+        migrated = migrateV3ToV4(database, errorMessage);
       } else {
         if (errorMessage != nullptr)
           *errorMessage = "不支持的 schema 版本";
