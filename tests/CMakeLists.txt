@@ -1,0 +1,13 @@
+function(add_pros_test target source)
+  add_executable(${target} ${source})
+  target_link_libraries(${target} PRIVATE Qt6::Core Qt6::Test pros_infrastructure)
+  pros_enable_warnings(${target})
+  add_test(NAME ${target} COMMAND ${target})
+endfunction()
+
+add_pros_test(app_config_test app_config_test.cpp)
+add_pros_test(local_data_directory_test local_data_directory_test.cpp)
+add_pros_test(schema_migrator_test schema_migrator_test.cpp)
+add_pros_test(app_log_contract_test app_log_contract_test.cpp)
+add_dependencies(app_log_contract_test personal_research_os)
+target_compile_definitions(app_log_contract_test PRIVATE PROS_APP_EXECUTABLE="$<TARGET_FILE:personal_research_os>")

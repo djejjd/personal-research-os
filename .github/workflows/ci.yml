@@ -19,14 +19,17 @@ jobs:
         run: git diff --check origin/${{ github.base_ref }}...HEAD
       - name: Reject private documents
         run: |
-          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -q '^docs/'; then
-            echo 'docs/ contains local private design records and cannot be submitted.' >&2
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD | grep -Eq '^(docs/|scripts/docs/)'; then
+            echo 'docs/ and scripts/docs/ contain local private design records and cannot be submitted.' >&2
             exit 1
           fi
 
   build-and-test:
     name: Build and test
     runs-on: macos-14
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -36,9 +39,22 @@ jobs:
         run: |
           echo 'CMake projects must provide scripts/check.sh.' >&2
           exit 1
-      - name: Install build dependencies
+      - name: Pin Homebrew and core revisions
         if: ${{ hashFiles('CMakeLists.txt') != '' }}
-        run: brew install cmake ninja qt
+        run: |
+          . ./toolchain.lock.sh
+          brew_repository="$(brew --repository)"
+          git -C "$brew_repository" fetch --depth=1 origin "$PROS_HOMEBREW_REVISION"
+          git -C "$brew_repository" checkout --force --detach "$PROS_HOMEBREW_REVISION"
+          test "$(git -C "$brew_repository" rev-parse HEAD)" = "$PROS_HOMEBREW_REVISION"
+          brew tap --force homebrew/core https://github.com/Homebrew/homebrew-core
+          core_repository="$(brew --repo homebrew/core)"
+          git -C "$core_repository" fetch --depth=1 origin "$PROS_HOMEBREW_CORE_REVISION"
+          git -C "$core_repository" checkout --force --detach "$PROS_HOMEBREW_CORE_REVISION"
+          test "$(git -C "$core_repository" rev-parse HEAD)" = "$PROS_HOMEBREW_CORE_REVISION"
+      - name: Install locked build and static-analysis dependencies
+        if: ${{ hashFiles('CMakeLists.txt') != '' }}
+        run: brew bundle install --file Brewfile --no-upgrade
       - name: Run local check entrypoint
         if: ${{ hashFiles('scripts/check.sh') != '' }}
         run: scripts/check.sh

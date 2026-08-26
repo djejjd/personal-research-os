@@ -2,7 +2,7 @@
 
 Personal Research OS is a local-first desktop workspace for personal knowledge, research, and project management.
 
-The public repository is being prepared. Application implementation has not started yet.
+The repository currently contains the V0.1 local Qt engineering baseline. Product features have not started yet.
 
 ## Development Status
 
