@@ -2,11 +2,13 @@
 
 Personal Research OS is a local-first desktop workspace for personal knowledge, research, and project management.
 
-The repository currently contains the V0.1 local Qt engineering baseline. Product features have not started yet.
+The repository is temporarily archived at the end of the V0.1 local Qt engineering baseline. Product-facing Qt workspace features have not started yet.
 
 ## Development Status
 
-The first planned engineering milestone establishes the Qt and CMake baseline. Product design records are maintained locally and are intentionally excluded from this public repository until they have been prepared for publication.
+The first engineering milestones establish the Qt/CMake baseline, local domain transactions, file coordination and recovery, and rebuildable knowledge indexing. Product design records are maintained locally and are intentionally excluded from this public repository until they have been prepared for publication.
+
+See [PROJECT_STATUS.md](PROJECT_STATUS.md) for the archived progress snapshot and [QT_LEARNING_PLAN.md](QT_LEARNING_PLAN.md) for a code-grounded Qt study path.
 
 ## Development Dependencies
 
